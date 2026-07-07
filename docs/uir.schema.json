@@ -1,0 +1,546 @@
+{
+  "$defs": {
+    "ChunkNode": {
+      "additionalProperties": false,
+      "description": "A leaf text chunk in the document hierarchy.",
+      "properties": {
+        "id": {
+          "pattern": "^(doc|section|table|figure|list|chunk|entity)_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "chunk",
+          "title": "Type",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "token_count": {
+          "minimum": 0,
+          "title": "Token Count",
+          "type": "integer"
+        },
+        "page": {
+          "minimum": 0,
+          "title": "Page",
+          "type": "integer"
+        },
+        "bounding_box": {
+          "anyOf": [
+            {
+              "description": "[x1, y1, x2, y2] rectangle normalized to a 0-1000 virtual canvas. Canonical ordering (x1 <= x2 and y1 <= y2).",
+              "maxItems": 4,
+              "minItems": 4,
+              "prefixItems": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "integer"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bounding Box"
+        },
+        "confidence": {
+          "description": "Per-chunk extraction confidence [0, 1].",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "modal_features": {
+          "additionalProperties": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "description": "Free-form per-modality feature dict. Phase 2 adds audio/video entries here without schema churn.",
+          "title": "Modal Features",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "text",
+        "token_count",
+        "page",
+        "confidence"
+      ],
+      "title": "ChunkNode",
+      "type": "object"
+    },
+    "Entity": {
+      "additionalProperties": false,
+      "description": "A named entity extracted from the document.\n\nNOTE: entities are referenced from relationships by id (see\n``Relationship.from_id``/``to_id``). Entity objects themselves do not\ncarry an ``id`` here per INSTRUCTIONS.md; downstream code maintains the\nid mapping outside the schema. Cross-referential integrity is therefore\nnot enforced by the schema (and is a v1-deferred validation per\nPLAN.md \u00a79 Phase E).",
+      "properties": {
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "type": {
+          "title": "Type",
+          "type": "string"
+        },
+        "confidence": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        }
+      },
+      "required": [
+        "text",
+        "type",
+        "confidence"
+      ],
+      "title": "Entity",
+      "type": "object"
+    },
+    "ExtractionProvenance": {
+      "additionalProperties": false,
+      "description": "Provenance for the extraction step (identifies the upstream model).",
+      "properties": {
+        "model": {
+          "description": "Upstream model name (e.g. 'LayoutLMv3').",
+          "title": "Model",
+          "type": "string"
+        },
+        "version": {
+          "description": "Upstream model version (e.g. '1.2.0').",
+          "title": "Version",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "version",
+        "timestamp"
+      ],
+      "title": "ExtractionProvenance",
+      "type": "object"
+    },
+    "Metadata": {
+      "additionalProperties": false,
+      "description": "PDF / document metadata.",
+      "properties": {
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "author": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Author"
+        },
+        "created": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created"
+        },
+        "modified": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Modified"
+        },
+        "page_count": {
+          "minimum": 0,
+          "title": "Page Count",
+          "type": "integer"
+        },
+        "language": {
+          "default": "en",
+          "description": "ISO 639-1 code (e.g. 'en').",
+          "title": "Language",
+          "type": "string"
+        },
+        "domain": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Inferred document domain (e.g. 'financial'), or null.",
+          "title": "Domain"
+        }
+      },
+      "required": [
+        "title",
+        "page_count"
+      ],
+      "title": "Metadata",
+      "type": "object"
+    },
+    "NormalizationProvenance": {
+      "additionalProperties": false,
+      "description": "Provenance for the UIR normalization step. No upstream model id.",
+      "properties": {
+        "version": {
+          "description": "UIR normalization schema version (e.g. '1.0').",
+          "title": "Version",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "timestamp"
+      ],
+      "title": "NormalizationProvenance",
+      "type": "object"
+    },
+    "Provenance": {
+      "additionalProperties": false,
+      "description": "Pipeline-run provenance (extraction + normalization).",
+      "properties": {
+        "extraction": {
+          "$ref": "#/$defs/ExtractionProvenance"
+        },
+        "normalization": {
+          "$ref": "#/$defs/NormalizationProvenance"
+        }
+      },
+      "required": [
+        "extraction",
+        "normalization"
+      ],
+      "title": "Provenance",
+      "type": "object"
+    },
+    "Relationship": {
+      "additionalProperties": false,
+      "description": "A relationship between two entities (referenced by id or by name).\n\nThe JSON key `from` is aliased to Python attribute `from_` because\n`from` is a Python reserved word.",
+      "properties": {
+        "from": {
+          "description": "Source entity id or name.",
+          "title": "From",
+          "type": "string"
+        },
+        "to": {
+          "description": "Target entity id or name.",
+          "title": "To",
+          "type": "string"
+        },
+        "type": {
+          "title": "Type",
+          "type": "string"
+        },
+        "confidence": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        }
+      },
+      "required": [
+        "from",
+        "to",
+        "type",
+        "confidence"
+      ],
+      "title": "Relationship",
+      "type": "object"
+    },
+    "Semantics": {
+      "additionalProperties": false,
+      "description": "Document-level semantic enrichment (entities, relationships, topics).",
+      "properties": {
+        "entities": {
+          "items": {
+            "$ref": "#/$defs/Entity"
+          },
+          "title": "Entities",
+          "type": "array"
+        },
+        "relationships": {
+          "items": {
+            "$ref": "#/$defs/Relationship"
+          },
+          "title": "Relationships",
+          "type": "array"
+        },
+        "topics": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Topics",
+          "type": "array"
+        }
+      },
+      "title": "Semantics",
+      "type": "object"
+    },
+    "Source": {
+      "additionalProperties": false,
+      "description": "Document source descriptor (Phase 1: PDF files).",
+      "properties": {
+        "uri": {
+          "description": "Source URI (e.g. s3://, file://, https://).",
+          "title": "Uri",
+          "type": "string"
+        },
+        "format": {
+          "const": "PDF",
+          "default": "PDF",
+          "title": "Format",
+          "type": "string"
+        },
+        "mime_type": {
+          "description": "IANA MIME type (e.g. application/pdf).",
+          "title": "Mime Type",
+          "type": "string"
+        },
+        "size_bytes": {
+          "description": "File size in bytes.",
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "checksum": {
+          "description": "Algorithm-prefixed checksum (e.g. 'sha256:abc...').",
+          "title": "Checksum",
+          "type": "string"
+        },
+        "timestamp": {
+          "description": "ISO8601 ingest/processing timestamp.",
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        }
+      },
+      "required": [
+        "uri",
+        "mime_type",
+        "size_bytes",
+        "checksum",
+        "timestamp"
+      ],
+      "title": "Source",
+      "type": "object"
+    },
+    "Structure": {
+      "additionalProperties": false,
+      "description": "The hierarchical structural tree.",
+      "properties": {
+        "type": {
+          "const": "hierarchical",
+          "default": "hierarchical",
+          "title": "Type",
+          "type": "string"
+        },
+        "root": {
+          "$ref": "#/$defs/StructureNode"
+        }
+      },
+      "required": [
+        "root"
+      ],
+      "title": "Structure",
+      "type": "object"
+    },
+    "StructureNode": {
+      "additionalProperties": false,
+      "description": "A non-leaf node in the document hierarchy.\n\nCross-field validation: ``id`` must begin with the conventional prefix for\nthis node's ``type`` (e.g. ``type=document`` requires ``id=\"doc_<uuid>\"``).",
+      "properties": {
+        "id": {
+          "pattern": "^(doc|section|table|figure|list|chunk|entity)_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "document",
+            "section",
+            "table",
+            "figure",
+            "list"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "page": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page"
+        },
+        "bounding_box": {
+          "anyOf": [
+            {
+              "description": "[x1, y1, x2, y2] rectangle normalized to a 0-1000 virtual canvas. Canonical ordering (x1 <= x2 and y1 <= y2).",
+              "maxItems": 4,
+              "minItems": 4,
+              "prefixItems": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "integer"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bounding Box"
+        },
+        "children": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "chunk": "#/$defs/ChunkNode",
+                "document": "#/$defs/StructureNode",
+                "figure": "#/$defs/StructureNode",
+                "list": "#/$defs/StructureNode",
+                "section": "#/$defs/StructureNode",
+                "table": "#/$defs/StructureNode"
+              },
+              "propertyName": "type"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/StructureNode"
+              },
+              {
+                "$ref": "#/$defs/ChunkNode"
+              }
+            ]
+          },
+          "title": "Children",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "type"
+      ],
+      "title": "StructureNode",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Universal Intermediate Representation v1.0 (Phase 1: PDF documents).\n\nTop-level discriminator: ``modal_type``. Phase 1 carries only\n``modal_type=document``; Phase 2+ adds audio/video/image variants.",
+  "properties": {
+    "uiR_version": {
+      "const": "1.0",
+      "title": "Uir Version",
+      "type": "string"
+    },
+    "id": {
+      "description": "Top-level UIR id. Conventionally a UUID5 derived from the source URI per PLAN.md \u00a78. The schema does not enforce a particular shape here to allow upstream UUID library upgrades.",
+      "title": "Id",
+      "type": "string"
+    },
+    "modal_type": {
+      "const": "document",
+      "default": "document",
+      "title": "Modal Type",
+      "type": "string"
+    },
+    "source": {
+      "$ref": "#/$defs/Source"
+    },
+    "metadata": {
+      "$ref": "#/$defs/Metadata"
+    },
+    "structure": {
+      "$ref": "#/$defs/Structure"
+    },
+    "semantics": {
+      "$ref": "#/$defs/Semantics"
+    },
+    "provenance": {
+      "$ref": "#/$defs/Provenance"
+    }
+  },
+  "required": [
+    "uiR_version",
+    "id",
+    "source",
+    "metadata",
+    "structure",
+    "semantics",
+    "provenance"
+  ],
+  "title": "UIRV1",
+  "type": "object"
+}

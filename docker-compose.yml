@@ -1,0 +1,48 @@
+# docker-compose.yml -- Weaviate single-node for local dev (PLAN.md §9 Phase C)
+#
+# Exit criterion: `docker compose up -d` brings Weaviate; `curl
+# http://localhost:18080/v1/meta` returns 200. Phase K (weaviate_store.py /
+# embed.py) creates `UIRChunks_v1` and `UIRParentDoc_v1` collections on
+# first run.
+#
+# Why host port 18080, not 8080:
+#   -- Container port 8080 (Weaviate's default HTTP) is preserved as-is.
+#   -- Host port 18080 is the bind. macOS frequently has another listener
+#      (Python dev server, etc.) on 8080; we offset by 10000 to stay out of
+#      common collision space.
+#   -- `WEAVIATE_URL=http://localhost:18080` in `.env` matches.
+#   -- If you DO have :8080 free, change the host port to `"8080:8080"` and
+#      drop the prefix from `WEAVIATE_URL` to default dev mode.
+#
+# Image (per PLAN.md §9 Phase C):
+#   -- cr.weaviate.io/semitechnologies/weaviate:1.27.0 (ARM64 verified).
+#   -- Compatible with weaviate-client >= 4.5 (we ship 4.22.0).
+#
+# Auth:
+#   -- AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED=true for MVP local dev.
+#   -- Phase-2 cloud deployment flips this to an API key.
+
+services:
+  weaviate:
+    image: cr.weaviate.io/semitechnologies/weaviate:1.27.0
+    container_name: uir_pipeline_weaviate
+    restart: unless-stopped
+    ports:
+      - "18080:8080"   # HTTP (REST)  -- host 18080 -> container 8080
+      - "50051:50051"  # gRPC         -- host 50051 -> container 50051
+    environment:
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
+      QUERY_DEFAULTS_LIMIT: "25"
+      # Disable built-in vectorizer modules; we ship our own vectors from
+      # sentence-transformers (BGE-small, 384-dim) so vectorization is
+      # BYO. Phase 2 can flip this for cloud deployments.
+      ENABLE_MODULES: ""
+    volumes:
+      - ./data/weaviate:/var/lib/weaviate
+    healthcheck:
+      test: ["CMD", "curl", "-f", "-s", "-S", "http://localhost:8080/v1/meta"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 60s

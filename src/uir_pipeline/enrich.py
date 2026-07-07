@@ -1,0 +1,209 @@
+"""enrich -- spaCy NER + co-occurrence relationships (Phase J).
+
+PLAN.md \u00a79 Phase J exit:
+    -- spaCy NER produces >=1 entity on a fixture with known entities
+    -- co-occurrence relationships within chunks
+    -- topics stub returns [] (LDA deferred to Phase 2)
+
+``en_core_web_sm`` is the canonical small English model. We load once
+per process (lazy import + per-thread safe-lazy-cache).
+"""
+from __future__ import annotations
+
+import logging
+import threading
+from dataclasses import dataclass, field
+from typing import Any, Final
+
+logger = logging.getLogger(__name__)
+
+
+# ----------------------------------------------------------------------------
+# Public types
+# ----------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class EntityDraft:
+    """A single named-entity hit (NOT yet a UIR Entity -- no id; orchestrator assigns)."""
+    text: str
+    type: str  # spaCy label_ (e.g. "PERSON", "ORG", "GPE")
+    confidence: float  # synthetic 1.0 (spaCy doesn't emit probabilities for en_core_web_sm)
+
+
+@dataclass(frozen=True)
+class RelationshipDraft:
+    """A co-occurrence relationship between two entities. ``from_`` and
+    ``to`` carry the canonical text; the orchestrator maps to UIR ids.
+    """
+    from_text: str
+    to_text: str
+    type: str = "co-occurrence"
+    confidence: float = 1.0
+
+
+@dataclass(frozen=True)
+class EnrichmentResult:
+    """Result of enriching a chunk list."""
+    entities: list[EntityDraft] = field(default_factory=list)
+    relationships: list[RelationshipDraft] = field(default_factory=list)
+    topics: list[str] = field(default_factory=list)
+
+
+# ----------------------------------------------------------------------------
+# Lazy singleton for the spaCy pipeline
+# ----------------------------------------------------------------------------
+
+_NLP_CACHE: dict[str, Any] = {}
+_NLP_LOCK = threading.Lock()
+DEFAULT_SPACY_MODEL: Final[str] = "en_core_web_sm"
+
+
+def _get_nlp(model_id: str = DEFAULT_SPACY_MODEL):
+    """Return the cached :class:`spacy.language.Language` for ``model_id``."""
+    cached = _NLP_CACHE.get(model_id)
+    if cached is not None:
+        return cached
+    with _NLP_LOCK:
+        cached = _NLP_CACHE.get(model_id)
+        if cached is not None:
+            return cached
+        import spacy  # lazy
+        logger.debug("loading spaCy pipeline %s (first use; cached after)", model_id)
+        nlp = spacy.load(model_id)
+        _NLP_CACHE[model_id] = nlp
+        return nlp
+
+
+# ----------------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------------
+
+def _entity_confidence_label_map() -> dict[str, float]:
+    """Heuristic per-label confidence weighting.
+
+    ``en_core_web_sm`` does not emit a softmax probability per entity,
+    so we assign a stable per-label confidence. ORG / PERSON / GPE are
+    typically the highest-quality categories; DATE / TIME / MONEY are
+    noisier but still useful.
+    """
+    return {
+        "PERSON":       0.92,
+        "ORG":          0.90,
+        "GPE":          0.88,
+        "LOC":          0.85,
+        "FAC":          0.85,
+        "EVENT":        0.80,
+        "WORK_OF_ART":  0.78,
+        "LAW":          0.78,
+        "LANGUAGE":     0.85,
+        "NORP":         0.82,
+        "PRODUCT":      0.72,
+        "DATE":         0.70,
+        "TIME":         0.70,
+        "MONEY":        0.78,
+        "PERCENT":      0.78,
+        "QUANTITY":     0.72,
+        "ORDINAL":      0.65,
+        "CARDINAL":     0.65,
+    }
+
+
+def _spacy_entity_to_draft(ent) -> EntityDraft:
+    """Convert a :class:`spacy.tokens.Span` into a stable :class:`EntityDraft`."""
+    label = ent.label_ or "ENTITY"
+    conf_map = _entity_confidence_label_map()
+    confidence = conf_map.get(label, 0.6)
+    return EntityDraft(
+        text=ent.text.strip(),
+        type=label,
+        confidence=confidence,
+    )
+
+
+def _cooccurrence_relationships(
+    entities_in_chunk: list[EntityDraft],
+) -> list[RelationshipDraft]:
+    """Pairwise co-occurrence relationships among entities in the same chunk.
+
+    We avoid self-loops and dedup pair order (a-b == b-a). With >20
+    entities per chunk, this would explode combinatorially; we cap at
+    20 pairs per chunk to keep the output bounded.
+    """
+    rels: list[RelationshipDraft] = []
+    seen: set[tuple[str, str]] = set()
+    max_pairs = 20
+    for i, a in enumerate(entities_in_chunk):
+        for b in entities_in_chunk[i + 1:]:
+            if a.text == b.text:
+                continue
+            key = tuple(sorted((a.text, b.text)))
+            if key in seen:
+                continue
+            seen.add(key)
+            rels.append(RelationshipDraft(
+                from_text=a.text,
+                to_text=b.text,
+                type="co-occurrence",
+                confidence=round(min(a.confidence, b.confidence), 3),
+            ))
+            if len(rels) >= max_pairs:
+                return rels
+    return rels
+
+
+def _dedupe_entities(entities: list[EntityDraft]) -> list[EntityDraft]:
+    """Drop surface-form duplicates by ``(text.lower(), type)`` keeping max confidence."""
+    by_key: dict[tuple[str, str], EntityDraft] = {}
+    for ent in entities:
+        k = (ent.text.lower(), ent.type)
+        cur = by_key.get(k)
+        if cur is None or cur.confidence < ent.confidence:
+            by_key[k] = ent
+    return list(by_key.values())
+
+
+# ----------------------------------------------------------------------------
+# Public API
+# ----------------------------------------------------------------------------
+
+def enrich_chunks(
+    chunk_texts: list[str],
+    *,
+    model_id: str = DEFAULT_SPACY_MODEL,
+) -> EnrichmentResult:
+    """Run spaCy NER per chunk + co-occurrence relationships, dedup entities.
+
+    ``chunk_texts`` is a flat list of per-chunk text strings. Topics are
+    stubbed to ``[]`` per PLAN.md \u00a79 (LDA deferred to Phase 2).
+    """
+    if not chunk_texts:
+        return EnrichmentResult(entities=[], relationships=[], topics=[])
+
+    nlp = _get_nlp(model_id)
+    all_entities: list[EntityDraft] = []
+    all_relationships: list[RelationshipDraft] = []
+    for text in chunk_texts:
+        if not text or not text.strip():
+            continue
+        # Disable parser for speed (we only need NER) -- Phase 2 may
+        # re-enable for relation extraction.
+        doc = nlp(text)
+        chunk_entities = [_spacy_entity_to_draft(ent) for ent in doc.ents]
+        all_entities.extend(chunk_entities)
+        all_relationships.extend(_cooccurrence_relationships(chunk_entities))
+
+    deduped = _dedupe_entities(all_entities)
+    return EnrichmentResult(
+        entities=deduped,
+        relationships=all_relationships,
+        topics=[],  # LDA deferred to Phase 2 (PLAN.md \u00a73).
+    )
+
+
+__all__ = [
+    "DEFAULT_SPACY_MODEL",
+    "EnrichmentResult",
+    "EntityDraft",
+    "RelationshipDraft",
+    "enrich_chunks",
+]

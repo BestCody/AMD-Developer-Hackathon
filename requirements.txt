@@ -1,0 +1,50 @@
+# Phase 1 PDF → UIR Pipeline — Python dependencies
+# Target Python 3.10–3.13 (Python 3.14 wheels lag for some ML libs).
+
+# --- Core data validation + serialization ---
+pydantic>=2.5,<3
+python-dotenv>=1.0
+python-json-logger>=2.0
+
+# --- PDF parsing ---
+pypdf>=4.0
+pdfplumber>=0.10
+
+# --- OCR ---
+# Primary:  EasyOCR (PyTorch-native, AMD-portable per PLAN.md §4)
+# Fallback: Tesseract via pytesseract (requires `tesseract` binary on PATH)
+easyocr>=1.7
+pytesseract>=0.3.10
+Pillow>=10.0
+
+# NumPy compat: easyocr 1.7.x ships numpy-2 support and the install resolves
+# fine, but some internal codepaths assume pre-2.x APIs (np.float was removed
+# in numpy 1.20+). If easyocr.readtext() explodes at runtime with a numpy
+# AttributeError, pin `numpy<2.0` here and re-run with
+# `pip install --force-reinstall --no-deps easyocr`.
+
+# --- Layout model ---
+# LayoutLMv3 (`microsoft/layoutlmv3-base`) — text+bbox branch for MVP
+# (per PLAN.md §9 Phase A.5; avoids the Detectron2 dependency).
+torch>=2.1
+transformers>=4.36
+
+# --- Embeddings ---
+# sentence-transformers wraps the BAAI/bge-small-en-v1.5 model (384-dim).
+sentence-transformers>=2.2
+
+# --- NER (Phase J) ---
+spacy>=3.7
+# Run `python -m spacy download en_core_web_sm` after install for the NER model.
+
+# --- Vector store ---
+weaviate-client>=4.5
+
+# --- Web front-end (Phase N) ---
+flask>=3.1,<4
+
+# --- Dev tooling ---
+pytest>=8.0
+pytest-mock>=3.11
+mypy>=1.7
+ruff>=0.1

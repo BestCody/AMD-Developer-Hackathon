@@ -1,0 +1,47 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# --- venvs ---
+.venv/
+venv/
+env/
+
+# --- Secrets / env ---
+.env
+.env.local
+.env.*.local
+
+# --- IDE / OS ---
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- Tooling caches ---
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Local data ---
+# Inputs (PDFs the user drops for local runs)
+data/input/*
+!data/input/.gitkeep
+# Outputs (UIR JSON written by the pipeline; never committed)
+data/output/*
+!data/output/.gitkeep
+# Per-doc structured logs
+data/logs/*
+!data/logs/.gitkeep
+
+# --- Test fixtures ---
+# Real PDFs we use for integration tests; pulled separately per fixture.
+tests/fixtures/sample_pdfs/*
+!tests/fixtures/sample_pdfs/.gitkeep
