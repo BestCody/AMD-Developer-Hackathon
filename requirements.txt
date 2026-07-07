@@ -29,6 +29,13 @@ Pillow>=10.0
 torch>=2.1
 transformers>=4.36
 
+# --- Tier 3 image-awareness (per PLAN_TIER3.md) ---
+# Florence-2-base captioner (transformers + accelerate for device_map).
+accelerate>=0.27
+einops>=0.7
+# PyMuPDF for per-region PNG rendering (figure crops in Tier 3).
+pymupdf>=1.24
+
 # --- Embeddings ---
 # sentence-transformers wraps the BAAI/bge-small-en-v1.5 model (384-dim).
 sentence-transformers>=2.2

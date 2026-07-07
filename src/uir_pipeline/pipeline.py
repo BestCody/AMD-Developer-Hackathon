@@ -27,6 +27,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -213,7 +214,47 @@ def run(
             logger.warning("tables extraction failed: %s", exc)
             table_drafts = []
 
-        # Stage 6: chunking -- union of layout regions + table markdown
+        # Stage 5.5 (Tier 3, per PLAN_TIER3.md): image captioning.
+        # Detects figure regions via pdfplumber.Page.images, renders each
+        # crop with PyMuPDF, runs Florence-2-base for a structured caption,
+        # and emits ChunkNode-compatible shims that share the BGE-embedding
+        # pipeline with text chunks. Fail-soft: any exception here is logged
+        # and the document emits without figure captions (no UIR schema break).
+        _progress("figure_caption", 60)
+        figure_chunk_shims: list[Any] = []
+        try:
+            from uir_pipeline.caption import caption_figures_in_pdf
+            from uir_pipeline.utils import count_tokens as _bpe_count_tokens
+            figure_records = caption_figures_in_pdf(p, page_numbers=page_numbers)
+            for fig in (figure_records or []):
+                cap = (fig.get("caption") or "").strip()
+                if not cap:
+                    continue
+                figure_chunk_shims.append(SimpleNamespace(
+                    text=cap,
+                    # BPE token count, not word-split: Florence-2's <MORE_DETAILED_CAPTION>
+                    # output is subword-tokenized downstream (BGE embedder), so
+                    # keeping the figure ChunkNode on the same scale avoids a
+                    # UI badge mismatch and keeps BGE chunk-overlap stitching coherent.
+                    token_count=_bpe_count_tokens(cap),
+                    page=int(fig["page"]),
+                    bbox=tuple(fig["bbox_canvas"]),
+                    # 0.8 heuristic floor: Florence-2 doesn't expose per-image
+                    # logprob at its API surface, and CaptionerBeam scores aren't
+                    # directly translatable to a confidence scalar. PLAN_TIER3
+                    # risk 8 flagged confidence propagation as deferred. Re-tune
+                    # once we collect a labelled figure-caption dataset.
+                    confidence=0.8,
+                    modal_features={"figure": {
+                        "image_b64": fig.get("image_b64"),
+                        "caption_prompt": fig.get("caption_prompt"),
+                        "caption_model": fig.get("caption_model"),
+                    }},
+                ))
+        except Exception as exc:
+            logger.warning("figure caption stage failed (fail-soft): %s", exc)
+
+        # Stage 6: chunking -- union of layout regions + table markdown + figure captions
         _progress("chunk", 70)
         all_chunks: list[Any] = []
         for region in all_regions:
@@ -228,6 +269,7 @@ def run(
                 page=table.page_number,
                 bbox=table.bbox,
             ))
+        all_chunks.extend(figure_chunk_shims)  # Tier 3 captions get BGE vectors
         if not all_chunks and page_text_pairs:
             # No regions / no tables -- chunk the whole document text.
             full_text = " ".join(text for _, text in page_text_pairs if text)
