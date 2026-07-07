@@ -4,7 +4,7 @@ Pipeline that ingests PDF documents and emits **Universal Intermediate Represent
 
 This is the MVP for an AMD-hackathon project (Phase 1, multimodal unification system). For the **full plan**, see [`PLAN.md`](./PLAN.md). For the **upstream spec**, see [`INSTRUCTIONS.md`](./INSTRUCTIONS.md).
 
-> Status: 🔨 Phase A (Bootstrap) in progress. See `PLAN.md` §9 for the per-phase exit criteria.
+> Status: 🔨 Phase A (Bootstrap) in progress. Repository initialized and pushed to GitHub: BestCody/AMD-Developer-Hackathon. See `PLAN.md` §9 for the per-phase exit criteria.
 
 ---
 

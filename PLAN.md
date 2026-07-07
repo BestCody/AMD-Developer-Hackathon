@@ -1,7 +1,6 @@
 # Phase 1 PDF → UIR Pipeline — MVP Plan
 
-> Status: **locked**, awaiting go-ahead to begin implementation.
-> Owner: AMA (AMD Hackathon, Phase 1, multimodal unification system)
+> Status: **in progress** - Repository initialized and pushed to GitHub: BestCody/AMD-Developer-Hackathon. Owner: AMA (AMD Hackathon, Phase 1, multimodal unification system)
 > Upstream spec: [`INSTRUCTIONS.md`](./INSTRUCTIONS.md)
 
 ---
