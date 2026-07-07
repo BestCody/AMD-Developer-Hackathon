@@ -1,5 +1,5 @@
 /* app.js -- front-end logic for the Phase N UIR web UI.
-   No build pipeline: a single vanilla-JS module is plenty. */
+   Now also handles the optional ``intent`` reader-query input. */
 
 (() => {
   const $ = (sel) => document.querySelector(sel);
@@ -7,6 +7,7 @@
   const fileInput = $("#file-input");
   const fileLabel = $("#file-label");
   const runBtn = $("#run-btn");
+  const intentInput = $("#intent-input");
   const drop = document.querySelector(".file-drop");
   const statusSection = $("#status-section");
   const stageText = $("#stage-text");
@@ -24,6 +25,9 @@
 
   let currentJobId = null;
   let pollHandle = null;
+  // Most-recent /api/status payload -- used by renderResult to surface
+  // the intent-filter summary alongside the UIR preview.
+  let lastStatus = null;
 
   function setStatus({ stage, percent }) {
     stageText.textContent = stage || "—";
@@ -45,6 +49,8 @@
     pctText.textContent = "0%";
     jobIdEl.textContent = "—";
     elapsedEl.textContent = "0.0s";
+    // Keep the intent text across ``Run again`` clicks so the user can
+    // hit replay on a slightly different PDF without re-typing.
     if (pollHandle) { clearInterval(pollHandle); pollHandle = null; }
     currentJobId = null;
     runBtn.disabled = false;
@@ -68,7 +74,17 @@
     if (f) { fileInput.files = e.dataTransfer.files; setFile(f); }
   });
 
-  runBtn.addEventListener("click", () => fileInput.files[0] && submitJob(fileInput.files[0]));
+  // Pressing Enter on the intent input jumps straight to submission if a
+  // file is already picked. Saves a round-trip when the user has filled
+  // the query but not clicked the button.
+  intentInput?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && fileInput.files?.[0] && !runBtn.disabled) {
+      e.preventDefault();
+      submitJob(fileInput.files[0]);
+    }
+  });
+
+  runBtn.addEventListener("click", () => fileInput.files?.[0] && submitJob(fileInput.files[0]));
 
   async function submitJob(file) {
     reset();
@@ -77,6 +93,8 @@
     show("status-section");
     const fd = new FormData();
     fd.append("file", file);
+    const userIntent = (intentInput?.value || "").trim();
+    if (userIntent) fd.append("intent", userIntent);
     let resp;
     try {
       resp = await fetch("/api/run", { method: "POST", body: fd });
@@ -104,7 +122,7 @@
       data = await r.json();
     } catch (e) { return; }   // transient: try again next tick
     setStatus({ stage: data.stage, percent: data.percent });
-    elapsedEl.textContent = `${(data.percent / 100 * 0).toFixed(1)}s`; // placeholder
+    lastStatus = data;
     if (data.finished_at && data.submitted_at) {
       const s = Math.max(0, data.finished_at - data.submitted_at);
       elapsedEl.textContent = `${s.toFixed(2)}s`;
@@ -123,15 +141,27 @@
     }
   }
 
+  function renderIntentSummary(baseText, intentSummary) {
+    if (!intentSummary) return baseText;
+    const kw = intentSummary.keywords && intentSummary.keywords.length
+      ? `keywords: ${intentSummary.keywords.join(", ")}`
+      : "no extractable keywords";
+    const fallback = intentSummary.no_match_fallback
+      ? " · expanded to full document (no keyword hit)"
+      : "";
+    return `${baseText} · ${intentSummary.matched_chunks} of ${intentSummary.total_chunks} chunks (intent: "${intentSummary.query}"; ${kw})${fallback}`;
+  }
+
   async function renderResult(meta) {
     if (!currentJobId) return;
-    // Fetch the full UIR document for in-browser rendering.  Fall back to
-    // the metadata-only view if it fails (e.g. transient network glitch).
+    // Fetch the (possibly intent-filtered) UIR document for in-browser
+    // rendering. Falls back to metadata-only if the fetch fails.
     let uirDoc = null;
     try {
       const r = await fetch(`/api/result/${currentJobId}`);
       if (r.ok) uirDoc = await r.json();
     } catch (e) { /* swallow; we'll render metadata below */ }
+    const intentSummary = lastStatus && lastStatus.intent;
 
     if (uirDoc) {
       const id = uirDoc.id || (meta && meta.uir_id) || "unknown";
@@ -143,13 +173,14 @@
         ? uirDoc.semantics.entities.length
         : (meta && meta.entity_count) ?? "?";
       const titleBit = title ? ` · ${title}` : "";
-      resultSummary.textContent = ` ${id}${titleBit} · ${nChunks} chunks · ${nEntities} entities`;
+      const baseSummary = `${id}${titleBit} · ${nChunks} chunks · ${nEntities} entities`;
+      resultSummary.textContent = renderIntentSummary(baseSummary, intentSummary);
       jsonOutput.textContent = JSON.stringify(uirDoc, null, 2);
       downloadLink.download = `${id}.uir.json`;
     } else {
       if (!meta) return showError("Pipeline returned no result.");
-      const summary = `${meta.chunk_count} chunks \u00b7 ${meta.entity_count} entities \u00b7 ${meta.elapsed_seconds}s`;
-      resultSummary.textContent = " " + summary;
+      const baseSummary = `${meta.chunk_count} chunks \u00b7 ${meta.entity_count} entities \u00b7 ${meta.elapsed_seconds}s`;
+      resultSummary.textContent = " " + baseSummary;
       jsonOutput.textContent = JSON.stringify(meta, null, 2);
       downloadLink.download = (meta.uir_id || currentJobId) + ".uir.json";
     }

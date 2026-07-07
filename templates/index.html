@@ -25,6 +25,21 @@
       <button id="run-btn" type="button" class="primary" disabled>Run pipeline</button>
     </section>
 
+    <section class="intent">
+      <label class="intent-label" for="intent-input">
+        <span class="intent-label__text">Intent <span class="muted">(optional)</span></span>
+        <small class="muted">leave blank for the full document · narrows results on keyword match, e.g. <code>"attention"</code>, <code>"table"</code>, <code>"section 3.2"</code></small>
+      </label>
+      <input
+        id="intent-input"
+        type="text"
+        name="intent"
+        class="intent-input"
+        placeholder='e.g. "show me the multi-head attention algorithm"'
+        autocomplete="off"
+        spellcheck="false">
+    </section>
+
     <section id="status-section" class="status hidden">
       <div class="status__row">
         <span class="status__label">Stage:</span>

@@ -95,6 +95,28 @@ def _get_florence2(
 
         # Lazy imports -- keep this module import-time-cheap.
         from transformers import AutoModelForCausalLM, AutoProcessor
+
+        # Compatibility shim: Florence-2's `trust_remote_code` modeling file
+        # reads `forced_bos_token_id` on its config class; transformers 4.46+
+        # removed that attribute from the base `PretrainedConfig`. We patch
+        # the dynamic Florence2Config class so the modeling code can read
+        # the attribute without raising AttributeError. The shim is a no-op
+        # if the attribute already exists, and the catch-all `except` keeps
+        # runtime non-fatal if the dynamic module isn't loadable here.
+        try:
+            from transformers.dynamic_module_utils import (
+                get_class_from_dynamic_module as _get_dyn_cls,
+            )
+            _florence_cfg_cls = _get_dyn_cls(
+                class_reference="configuration_florence2.Florence2Config",
+                pretrained_model_name_or_path=model_id,
+            )
+            if not hasattr(_florence_cfg_cls, "forced_bos_token_id"):
+                _florence_cfg_cls.forced_bos_token_id = None
+                logger.debug("applied Florence-2 compat shim: forced_bos_token_id=None")
+        except Exception as exc:
+            logger.debug("Florence-2 compat shim failed (load may still work): %s", exc)
+
         logger.debug(
             "loading Florence-2 model_id=%s device=%s dtype=%s (cold cache; first run downloads ~1.5 GB)",
             model_id, device, getattr(dtype, "__name__", str(dtype)),

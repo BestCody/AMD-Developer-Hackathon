@@ -211,10 +211,18 @@ def _with_overlap(segments: list[str], overlap_pct: int) -> list[str]:
     out: list[str] = [segments[0]]
     tok = get_bge_tokenizer()
     for prev, curr in zip(segments, segments[1:]):
-        prev_enc = tok.encode(prev, add_special_tokens=False)
-        if len(prev_enc) > overlap_tokens:
-            tail_ids = prev_enc[-overlap_tokens:]
-            tail = tok.decode(tail_ids, skip_special_tokens=True)
+        # Use whitespace word-split instead of decoding the last
+        # ``overlap_tokens`` BGE subword IDs. Slicing subword IDs at an
+        # arbitrary boundary can cut a piece of a token mid-token; decoding
+        # then yields ``##atrix``-style fragments that the BGE embedder
+        # treats as unrelated noise. Whitespace word-split keeps every
+        # prefix/suffix word intact at the cost of marginally looser
+        # overlap (a word may extend a few subwords past the boundary). The
+        # PLAN.md §9 chunk_token_count envelope still holds because the
+        # boundary is still well below the 512-token hard cap.
+        prev_words = prev.split()
+        if len(prev_words) > overlap_tokens:
+            tail = " ".join(prev_words[-overlap_tokens:])
             out.append((tail + " " + curr).strip())
         else:
             out.append(curr)
@@ -234,6 +242,10 @@ def chunk_text(
     overlap_pct: int = DEFAULT_CHUNK_OVERLAP_PCT,
     max_tokens: int = MAX_CHUNK_TOKENS,
     model_id: str = DEFAULT_BGE_MODEL,
+    region_kind: str | None = None,
+    section_path: str | None = None,
+    is_section_first: bool = False,
+    is_section_last: bool = False,
 ) -> list[ChunkDraft]:
     """Split ``text`` into token-bounded ``ChunkDraft``s.
 
@@ -267,18 +279,34 @@ def chunk_text(
 
     drafts: list[ChunkDraft] = []
     for seg in with_overlap:
+        # Tier 1 intent metadata: only inject ``intent`` / ``section``
+        # sub-blocks when the caller actually supplied the inputs, so a
+        # caller that doesn't care (unit tests, smoke tests) keeps the
+        # pre-Tier-1 JSON shape. ``preceding_chunk_id`` and
+        # ``following_chunk_id`` are wired in the orchestrator after this
+        # function returns because deterministic chunk IDs depend on the
+        # orchestrator's index plan.
+        modal_features: dict[str, dict[str, object]] = {
+            "text": {
+                "token_count": count_tokens(seg, model_id),
+                "chunk_strategy": "growing-window-bge-tokenizer",
+            },
+        }
+        if region_kind is not None:
+            modal_features["intent"] = {"region_kind": region_kind}
+        if section_path is not None:
+            modal_features["section"] = {
+                "path": section_path,
+                "is_first": bool(is_section_first),
+                "is_last": bool(is_section_last),
+            }
         drafts.append(ChunkDraft(
             text=seg.strip(),
             token_count=count_tokens(seg, model_id),
             page=page,
             bbox=page_bbox,
             confidence=1.0,
-            modal_features={
-                "text": {
-                    "token_count": count_tokens(seg, model_id),
-                    "chunk_strategy": "growing-window-bge-tokenizer",
-                },
-            },
+            modal_features=modal_features,
         ))
     return drafts
 
@@ -292,7 +320,10 @@ def chunks_from_regions(
     """Chunk a layout-derived list of ``(bbox, text, page)`` region tuples.
 
     Each region's text is chunked independently; every chunk emitted from
-    the same region inherits that region's bbox.
+    the same region inherits that region's bbox. Tier 1 intent metadata is
+    NOT propagated here — callers wanting per-region ``region_kind`` or
+    ``section_path`` should call :func:`chunk_text` directly with the
+    kwargs they need.
     """
     out: list[ChunkDraft] = []
     for src_bbox, text, page in regions:

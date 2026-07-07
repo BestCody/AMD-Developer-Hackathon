@@ -1,6 +1,6 @@
 """enrich -- spaCy NER + co-occurrence relationships (Phase J).
 
-PLAN.md \u00a79 Phase J exit:
+PLAN.md Section 9 Phase J exit:
     -- spaCy NER produces >=1 entity on a fixture with known entities
     -- co-occurrence relationships within chunks
     -- topics stub returns [] (LDA deferred to Phase 2)
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Final
 
@@ -174,7 +175,8 @@ def enrich_chunks(
     """Run spaCy NER per chunk + co-occurrence relationships, dedup entities.
 
     ``chunk_texts`` is a flat list of per-chunk text strings. Topics are
-    stubbed to ``[]`` per PLAN.md \u00a79 (LDA deferred to Phase 2).
+    populated from the top-5 most-frequent entity surface-forms (Fix Plan
+    item #5). The LDA path remains a Phase 2 stub per PLAN.md Section 3.
     """
     if not chunk_texts:
         return EnrichmentResult(entities=[], relationships=[], topics=[])
@@ -193,10 +195,21 @@ def enrich_chunks(
         all_relationships.extend(_cooccurrence_relationships(chunk_entities))
 
     deduped = _dedupe_entities(all_entities)
+    # Topics stand-in for the LDA stack (PLAN.md Section 3, deferred to
+    # Phase 2). The top-5 most-frequent entity surface-forms in a paper
+    # (Fix Plan item #5) are a reasonable proxy for "what this paper is
+    # about" until the LDA path lands. We surface-form-lower-case before
+    # counting so duplicates (BERT vs Bert) collapse into one topic. A
+    # 0-count Counter maps to topics=[] which is identical to the prior
+    # behaviour for entity-free inputs.
+    topic_counter = Counter(
+        e.text.strip().lower() for e in deduped if e.text.strip()
+    )
+    topics = [t for t, _ in topic_counter.most_common(5)]
     return EnrichmentResult(
         entities=deduped,
         relationships=all_relationships,
-        topics=[],  # LDA deferred to Phase 2 (PLAN.md \u00a73).
+        topics=topics,
     )
 
 

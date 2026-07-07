@@ -27,7 +27,11 @@ Pillow>=10.0
 # LayoutLMv3 (`microsoft/layoutlmv3-base`) — text+bbox branch for MVP
 # (per PLAN.md §9 Phase A.5; avoids the Detectron2 dependency).
 torch>=2.1
-transformers>=4.36
+# Pin upper bound <4.45: transformers 4.46+ removed `forced_bos_token_id`
+# from `PretrainedConfig` and Florence-2's `trust_remote_code` modeling
+# file still reads it. caption.py patches at runtime, but the pin prevents
+# fresh pip resolutions from landing on a silently broken transformers.
+transformers>=4.36,<4.45
 
 # --- Tier 3 image-awareness (per PLAN_TIER3.md) ---
 # Florence-2-base captioner (transformers + accelerate for device_map).

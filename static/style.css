@@ -3,6 +3,7 @@
   --card: rgba(255, 255, 255, 0.05);
   --card-border: rgba(255, 255, 255, 0.10);
   --text: #e6eaf2;
+  --text-strong: #ffffff;
   --muted: #8b94a7;
   --accent: #6ea8ff;
   --accent-2: #9d7bff;
@@ -47,10 +48,46 @@ header h1 {
   background-clip: text;
   color: transparent;
 }
+/* Text-color rules. ``color`` is an inherited CSS property, so a single
+   source on ``html, body`` cascades everywhere. We just need three
+   override points:
+   * ``--text-strong`` for emphasis + form fields (crisper on dark bg)
+   * ``.muted`` for de-emphasised copy (footer, helper text, code chips)
+   * nothing else -- explicit ``.intent small`` selectors previously
+   overrode ``.muted`` on the small itself via specificity, which made
+   inline <code> snippets render at body color instead of the muted
+   tint. The body cascade handles this correctly on its own. */
+strong { color: var(--text-strong); }
+.intent-input,
+input[type="text"],
+textarea,
+select { color: var(--text-strong); }
 .muted { color: var(--muted); }
 header p { margin: 0 0 24px; max-width: 60ch; line-height: 1.5; }
 
 .upload { display: flex; gap: 12px; align-items: stretch; }
+.intent { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.intent-label { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.intent-label__text { font-size: 14px; font-weight: 600; }
+.intent-label small { font-size: 12px; line-height: 1.4; }
+.intent-input {
+  width: 100%;
+  appearance: none;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 10px;
+  color: var(--text);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  padding: 11px 14px;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+.intent-input::placeholder { color: rgba(139, 148, 167, 0.75); }
+.intent-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: rgba(110, 168, 255, 0.06);
+  box-shadow: 0 0 0 3px rgba(110, 168, 255, 0.15);
+}
 .file-drop {
   flex: 1;
   display: flex;

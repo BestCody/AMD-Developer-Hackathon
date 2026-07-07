@@ -66,10 +66,55 @@ class Job:
     upload_path: Path | None = None
     uir_path: Path | None = None
     result: dict[str, Any] | None = None
+    stage_meta: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    # Intent-filter fields: when the user submits an optional ``intent``
+    # form field on /api/run, the runner thread post-processes the full
+    # UIR JSON down to matching chunks and stashes both paths + a
+    # summary here. ``/api/result`` serves the filtered form so the
+    # front-end shows only the chunks the agent needs to read.
+    intent: str | None = None
+    intent_uir_path: Path | None = None
+    intent_summary: dict[str, Any] | None = None
 
     def to_public(self) -> dict[str, Any]:
-        """Shape we return to the front-end (excludes paths)."""
+        """Shape we return to the front-end (excludes raw filesystem paths).
+
+        ``stage_meta`` is filtered to a small allowlist before serializing:
+        the orchestrator may push keys like ``error`` that contain Python
+        exception strings (paths, library versions), which would leak to
+        LAN viewers on a multi-user deploy. The full text stays in the
+        local stderr log via ``pipeline.py``. We surface only scalar
+        counters + booleans.
+        """
+        # Allowlist: stage_meta values we hand the front-end. Anything not
+        # in this set is hidden before JSON serialization. Add a key here
+        # only after a deliberate UX decision.
+        _META_PUBLIC_KEYS = (
+            "caption_records_total",
+            "caption_records_with_text",
+            "caption_records_empty",
+            "dropped_entities",
+            "dropped_relations",
+            "entity_count",
+            "relationship_count",
+        )
+        public_meta = {
+            k: v for k, v in (self.stage_meta or {}).items()
+            if k in _META_PUBLIC_KEYS
+        }
+        # Intent-filter summary: surfaced only when an intent was provided.
+        # Counters + keywords are safe to expose; we do not surface the
+        # keyword-match breakdown or chunk-level diff (LAN UI doesn't need it).
+        public_intent = None
+        if self.intent_summary is not None:
+            public_intent = {
+                "query": self.intent,
+                "matched_chunks": int(self.intent_summary.get("matched_chunks", 0)),
+                "total_chunks": int(self.intent_summary.get("total_chunks", 0)),
+                "keywords": self.intent_summary.get("keywords", []),
+                "no_match_fallback": bool(self.intent_summary.get("no_match", False)),
+            }
         return {
             "job_id": self.job_id,
             "status": self.status,
@@ -77,6 +122,8 @@ class Job:
             "percent": self.progress_percent,
             "submitted_at": self.submitted_at,
             "finished_at": self.finished_at,
+            "stage_meta": public_meta,
+            "intent": public_intent,
             "result": self.result,
             "error": self.error,
         }
@@ -131,8 +178,20 @@ def create_app(
         try:
             _advance(job, JOB_RUNNING, "ingest", 5, lock=jobs_lock)
 
-            def _on_progress(stage: str, pct: int) -> None:
+            def _on_progress(stage: str, pct: int, **meta: Any) -> None:
+                """Forward orchestrator progress + optional stage meta to the Job.
+
+                The orchestrator's :func:`uir_pipeline.pipeline.run` now passes
+                metadata (caption-empty counters, dropped-entity counts, etc.)
+                via ``**meta``. We accept and dispatch the same way the
+                on_progress callback signature evolved in pipeline.py. The
+                kwargs are absorbed at the job level so the front-end can
+                pick them up in subsequent ``/api/status/<job_id>`` polls.
+                """
                 _advance(job, JOB_RUNNING, stage, pct, lock=jobs_lock)
+                if meta:
+                    with jobs_lock:
+                        job.stage_meta = dict(meta)
 
             result = _pipeline_mod.run(
                 job.upload_path,
@@ -154,6 +213,45 @@ def create_app(
                     "entity_count": int(getattr(result, "entity_count", 0)),
                     "elapsed_seconds": float(getattr(result, "elapsed_seconds", 0.0)),
                 }
+                # Tier 1.5 + web: if an intent was supplied, post-process
+                # the freshly-written UIR JSON so the front-end can fetch a
+                # narrowed ``/api/result`` payload. ``intent_filter`` is a
+                # pure function over the JSON on disk -- safe to call from
+                # this thread (no shared state with the orchestrator).
+                if job.intent:
+                    try:
+                        from uir_pipeline.intent_filter import (
+                            filter_uirstream_by_intent,
+                        )
+                        summary = filter_uirstream_by_intent(
+                            job.uir_path, job.intent,
+                        )
+                        job.intent_uir_path = Path(summary["out_path"])
+                        job.intent_summary = summary
+                        # Augment result so the UI can show
+                        # ``"X of Y chunks (intent: ...)"`` from a single poll.
+                        job.result["intent_matched_chunks"] = int(
+                            summary["matched_chunks"]
+                        )
+                        job.result["intent_total_chunks"] = int(
+                            summary["total_chunks"]
+                        )
+                        job.result["intent_keywords"] = list(
+                            summary["keywords"]
+                        )
+                        job.result["intent_no_match_fallback"] = bool(
+                            summary["no_match"]
+                        )
+                        logger.info(
+                            "intent-filter: %d/%d chunks matched keywords=%s",
+                            summary["matched_chunks"], summary["total_chunks"],
+                            summary["keywords"],
+                        )
+                    except Exception as exc:  # noqa: BLE001 -- post-process is best-effort
+                        logger.warning(
+                            "intent-filter failed for job %s: %s",
+                            job.job_id, exc,
+                        )
                 job.status = JOB_DONE
                 job.finished_at = time.time()
         except Exception as exc:  # noqa: BLE001 -- top-level worker guard
@@ -187,7 +285,12 @@ def create_app(
         saved = upload_dir / f"{job_id}.pdf"
         upload.save(saved)
 
-        job = Job(job_id=job_id, upload_path=saved)
+        # Optional intent: a free-text reader-mode query.  Blank / missing
+        # means "send me the full document"; the front-end maps this to
+        # an opt-in text input alongside the file picker.
+        intent_str = (request.form.get("intent") or "").strip() or None
+
+        job = Job(job_id=job_id, upload_path=saved, intent=intent_str)
         with jobs_lock:
             jobs[job_id] = job
 
@@ -216,12 +319,14 @@ def create_app(
 
     @app.get("/api/result/<job_id>")
     def api_result(job_id: str) -> Response:
-        """Serve the full UIR document JSON inline (no attachment header).
+        """Serve the (intent-filtered, if set) UIR document JSON inline.
 
-        The front-end fetches this on job completion so the user sees the
-        full ``UIRV1`` document (with its ``structure``/``semantics``/
-        ``provenance`` blocks) instead of just the metadata shim.  Use
-        ``/api/download/<job_id>`` to save the file.
+        When the user submitted an optional ``intent`` form field on
+        ``/api/run``, this endpoint serves the narrowed result so the
+        front-end receives only the chunks that match the reader query
+        (reduces tokens sent to the calling LLM down to a small handful
+        instead of the full document). ``/api/download/<job_id>`` still
+        streams the *full* file so users can save the complete archive.
         """
         with jobs_lock:
             job = jobs.get(job_id)
@@ -229,7 +334,7 @@ def create_app(
                 abort(404, description="job not found")
             if job.status != JOB_DONE or job.uir_path is None:
                 abort(409, description=f"job not done (status={job.status})")
-            path = job.uir_path
+            path = job.intent_uir_path or job.uir_path
         return send_file(
             path,
             mimetype="application/json",
