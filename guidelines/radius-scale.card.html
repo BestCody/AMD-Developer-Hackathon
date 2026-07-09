@@ -1,0 +1,15 @@
+<!-- @dsCard group="Shape" viewport="700x150" subtitle="Pill for actions, lg for cards, none for full-bleed tiles" name="Radius Scale" -->
+<html><head><link rel="stylesheet" href="../styles.css"><style>
+  body{margin:0;padding:20px;font-family:var(--font-text);background:var(--surface-canvas)}
+  .row{display:flex;gap:14px;align-items:flex-end}
+  .box{width:80px;height:60px;background:var(--gray-50);border:1px solid var(--border-hairline);display:flex;align-items:flex-end;justify-content:center;padding-bottom:6px;font-size:10px;color:var(--text-muted-48)}
+</style></head><body>
+<div class="row">
+  <div class="box" style="border-radius:var(--radius-none)">none</div>
+  <div class="box" style="border-radius:var(--radius-xs)">xs 5</div>
+  <div class="box" style="border-radius:var(--radius-sm)">sm 8</div>
+  <div class="box" style="border-radius:var(--radius-md)">md 11</div>
+  <div class="box" style="border-radius:var(--radius-lg)">lg 18</div>
+  <div class="box" style="border-radius:var(--radius-pill);width:100px">pill</div>
+</div>
+</body></html>

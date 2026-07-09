@@ -1,0 +1,138 @@
+<!-- @dsCard group="Console" viewport="1440x860" name="Console App" subtitle="Login → upload/converting/badge → Gemini chat → profile chats" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aperture Console</title>
+<link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/lucide@0.462.0"></script>
+<script src="../../_ds_bundle.js"></script>
+<style>
+  html, body, #root { height: 100%; }
+  body { margin: 0; background: var(--surface-canvas); }
+  .console { display: flex; height: 100vh; }
+
+  @keyframes ap-spin { to { transform: rotate(360deg); } }
+  .ap-spin { animation: ap-spin 0.9s linear infinite; }
+
+  @keyframes ap-badge-pop {
+    0% { transform: scale(0); opacity: 0; }
+    60% { transform: scale(1.25); opacity: 1; }
+    100% { transform: scale(1); opacity: 1; }
+  }
+  .ap-badge-pop { animation: ap-badge-pop 0.5s cubic-bezier(0.22, 0.61, 0.36, 1) both; }
+
+  .ap-ring { position: absolute; inset: 0; border-radius: 50%; border: 2px solid transparent; }
+  .ap-ring--1 { border-top-color: var(--accent-primary); animation: ap-spin 1.6s linear infinite; }
+  .ap-ring--2 { inset: 12px; border-top-color: var(--accent-primary-on-dark); opacity: 0.6; animation: ap-spin 1.1s linear infinite reverse; }
+  .ap-ring--3 { inset: 24px; border-top-color: var(--gray-150); animation: ap-spin 2.2s linear infinite; }
+
+  .ap-file-delete { opacity: 0; transform: scale(0.85); transition: opacity var(--duration-fast) ease, transform var(--duration-fast) ease; }
+  .ap-file-icon:hover .ap-file-delete { opacity: 1; transform: scale(1); }
+
+  @keyframes ap-gemini-talk { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.15); } }
+  .ap-gemini-talk { animation: ap-gemini-talk 1.1s ease-in-out infinite; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" src="IconRail.jsx"></script>
+<script type="text/babel" src="UploadStage.jsx"></script>
+<script type="text/babel" src="CopilotChat.jsx"></script>
+<script type="text/babel" src="LoginScreen.jsx"></script>
+<script type="text/babel" src="ForgotPasswordScreen.jsx"></script>
+<script type="text/babel" src="SignUpScreen.jsx"></script>
+<script type="text/babel" src="ChatsPanel.jsx"></script>
+<script type="text/babel">
+const { Dialog, Button } = window.ApertureDesignSystem_0a9afd;
+const IconRail = window.ConsoleIconRail;
+const UploadStage = window.ConsoleUploadStage;
+const CopilotChat = window.ConsoleCopilotChat;
+const LoginScreen = window.ConsoleLoginScreen;
+const ForgotPasswordScreen = window.ConsoleForgotPasswordScreen;
+const SignUpScreen = window.ConsoleSignUpScreen;
+const ChatsPanel = window.ConsoleChatsPanel;
+
+let nextId = 1;
+
+function App() {
+  const [loggedIn, setLoggedIn] = React.useState(() => localStorage.getItem("aperture_logged_in") === "1");
+  const [authScreen, setAuthScreen] = React.useState("login");
+  const [tab, setTab] = React.useState("upload");
+  const [files, setFiles] = React.useState([]);
+  const [selectedId, setSelectedId] = React.useState(null);
+  const timers = React.useRef([]);
+
+  React.useEffect(() => {
+    if (window.lucide) window.lucide.createIcons();
+  });
+
+  React.useEffect(() => () => timers.current.forEach(clearTimeout), []);
+
+  function addFiles(names) {
+    const newOnes = names.map((name) => ({ id: nextId++, name, status: "processing" }));
+    setFiles((prev) => [...prev, ...newOnes]);
+    setSelectedId(newOnes[0].id);
+    newOnes.forEach((f, i) => {
+      const t = setTimeout(() => {
+        setFiles((prev) => prev.map((x) => (x.id === f.id ? { ...x, status: "done" } : x)));
+        const backT = setTimeout(() => {
+          setSelectedId((prev) => (prev === f.id ? null : prev));
+        }, 1000);
+        timers.current.push(backT);
+      }, 2200 + i * 400);
+      timers.current.push(t);
+    });
+  }
+
+  function deleteFile(id) {
+    setFiles((prev) => prev.filter((f) => f.id !== id));
+    setSelectedId((prev) => (prev === id ? null : prev));
+  }
+
+  if (!loggedIn) {
+    if (authScreen === "forgot") {
+      return <ForgotPasswordScreen onBack={() => setAuthScreen("login")} />;
+    }
+    if (authScreen === "signup") {
+      return (
+        <SignUpScreen
+          onBack={() => setAuthScreen("login")}
+          onSignedUp={() => {
+            localStorage.setItem("aperture_logged_in", "1");
+            setLoggedIn(true);
+          }}
+        />
+      );
+    }
+    return (
+      <LoginScreen
+        onLogin={() => {
+          localStorage.setItem("aperture_logged_in", "1");
+          setLoggedIn(true);
+        }}
+        onForgotPassword={() => setAuthScreen("forgot")}
+        onSignUp={() => setAuthScreen("signup")}
+      />
+    );
+  }
+
+  return (
+    <div className="console">
+      <IconRail active={tab} onChange={setTab} />
+      {tab === "upload" && (
+        <UploadStage files={files} selectedId={selectedId} onSelectFile={setSelectedId} onAddFiles={addFiles} onDeleteFile={deleteFile} />
+      )}
+      {tab === "gemini" && <CopilotChat files={files} />}
+      {tab === "chats" && <ChatsPanel />}
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

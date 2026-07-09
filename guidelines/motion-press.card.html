@@ -1,0 +1,10 @@
+<!-- @dsCard group="Motion" viewport="700x120" subtitle="scale(0.95) on press — the one system-wide micro-interaction" name="Press State" -->
+<html><head><link rel="stylesheet" href="../styles.css"><style>
+  body{margin:0;padding:24px;font-family:var(--font-text);background:var(--surface-canvas);display:flex;gap:16px;align-items:center}
+  button{font-family:var(--font-text);font-size:17px;padding:11px 22px;border-radius:var(--radius-pill);border:none;background:var(--accent-primary);color:#fff;cursor:pointer;transition:transform var(--duration-press) var(--ease-standard)}
+  button:active{transform:scale(var(--scale-press))}
+  .hint{font-size:12px;color:var(--text-muted-48)}
+</style></head><body>
+<button>Buy</button>
+<span class="hint">Click and hold — no color change, no shadow, just scale</span>
+</body></html>

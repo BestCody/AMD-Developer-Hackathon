@@ -1,0 +1,112 @@
+<!-- @dsCard group="Marketing" viewport="1440x900" name="Marketing Site" subtitle="Full-bleed alternating tiles — Apple section rhythm" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aperture — one format, every modality</title>
+<link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+<style>
+  body { margin: 0; }
+  .doc-card { width: 340px; background: var(--surface-canvas); border-radius: var(--radius-lg); box-shadow: var(--shadow-product); overflow: hidden; font-family: var(--font-mono); font-size: 11px; }
+  .doc-card__bar { background: var(--gray-100); padding: 8px 12px; display: flex; gap: 6px; }
+  .doc-card__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--gray-200); }
+  .doc-card__body { padding: 16px; color: var(--text-muted-80); line-height: 1.6; }
+  .doc-card__chunk { background: var(--blue-50); color: var(--accent-primary); border-radius: 4px; padding: 2px 4px; }
+  .feature-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; max-width: var(--container-max); margin: 0 auto; padding: var(--space-section) var(--space-xl); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" src="Nav.jsx"></script>
+<script type="text/babel" src="ProductTile.jsx"></script>
+<script type="text/babel" src="Footer.jsx"></script>
+<script type="text/babel">
+const { Button, Tag, Card, Badge } = window.ApertureDesignSystem_0a9afd;
+const Nav = window.MarketingNav;
+const ProductTile = window.MarketingProductTile;
+const Footer = window.MarketingFooter;
+
+function DocArt() {
+  return (
+    <div className="doc-card">
+      <div className="doc-card__bar"><div className="doc-card__dot" /><div className="doc-card__dot" /><div className="doc-card__dot" /></div>
+      <div className="doc-card__body">
+        <div>{'{'}</div>
+        <div>&nbsp;&nbsp;"uiR_version": "1.0",</div>
+        <div>&nbsp;&nbsp;"modal_type": "document",</div>
+        <div>&nbsp;&nbsp;"structure": {'{'} <span className="doc-card__chunk">chunks…</span> {'}'}</div>
+        <div>{'}'}</div>
+      </div>
+    </div>
+  );
+}
+
+function Page() {
+  return (
+    <div>
+      <Nav />
+      <ProductTile
+        tone="light"
+        eyebrow="Aperture"
+        title="One format. Every modality."
+        tagline="PDFs, videos, screenshots, logs — Aperture turns all of it into a single structured representation your agent can actually trust."
+        ctas={<><Button variant="primary">Try the console</Button><Button variant="secondary-pill">See the pipeline</Button></>}
+        art={<DocArt />}
+      />
+      <ProductTile
+        tone="dark"
+        eyebrow="Why it exists"
+        title="Messy inputs make agents hallucinate."
+        tagline="Every unstructured PDF or screenshot your RAG system retrieves is a chance for your agent to guess. Aperture removes the guesswork before it reaches the model."
+        ctas={<Button variant="primary">Read the mission</Button>}
+      />
+      <section id="pipeline" style={{ background: "var(--surface-parchment)", padding: "var(--space-section) var(--space-xl)" }}>
+        <h2 style={{ textAlign: "center", fontFamily: "var(--font-display)", fontSize: "var(--text-display-md-size)", fontWeight: 600, letterSpacing: "var(--text-display-md-tracking)", color: "var(--text-ink)", margin: "0 0 40px" }}>
+          Eight stages. One clean output.
+        </h2>
+        <div className="feature-grid">
+          {[
+            ["Ingest", "Validate, checksum, extract metadata"],
+            ["Layout", "Classify heading / paragraph / list / caption"],
+            ["Tables", "Structured extraction to markdown"],
+            ["Chunk", "~256 tokens, sentence-aware, overlap"],
+            ["Enrich", "Entities, relationships, topics"],
+            ["Embed", "384-d BGE-small vectors"],
+          ].map(([t, d]) => (
+            <Card key={t} title={t} subtitle={d} />
+          ))}
+        </div>
+      </section>
+      <ProductTile
+        tone="dark2"
+        eyebrow="Console"
+        title="Watch every document move through the pipeline."
+        tagline="Upload a PDF, follow it stage by stage, and inspect the resulting UIR as agent-readable markdown or raw JSON."
+        ctas={<Button variant="primary">Open the console</Button>}
+        art={
+          <div style={{ display: "flex", gap: 12 }}>
+            <Tag selected>Fast path</Tag>
+            <Tag>Full OCR</Tag>
+            <Badge kind="processing">Processing</Badge>
+          </div>
+        }
+      />
+      <section id="pricing" style={{ background: "var(--surface-canvas)", padding: "var(--space-section) var(--space-xl)", textAlign: "center" }}>
+        <h2 style={{ fontFamily: "var(--font-display)", fontSize: "var(--text-display-lg-size)", fontWeight: 600, color: "var(--text-ink)", margin: "0 0 16px" }}>
+          Stop feeding your agent garbage.
+        </h2>
+        <Button variant="store-hero">Get started</Button>
+      </section>
+      <Footer />
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<Page />);
+</script>
+</body>
+</html>

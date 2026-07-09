@@ -1,0 +1,45 @@
+<!-- @dsCard group="Components" viewport="700x300" name="Feedback" subtitle="Badge, Tag, Toast, Tooltip" -->
+<html><head>
+<link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+<style>body{margin:0;padding:20px;background:var(--surface-parchment);font-family:var(--font-text)}
+.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:18px}
+.lbl{font-size:11px;color:var(--text-muted-48);width:100%;margin-bottom:-6px}
+</style>
+</head><body>
+<div id="root"></div>
+<script type="text/babel">
+const { Badge, Tag, Toast, Tooltip, IconButton, Button } = window.ApertureDesignSystem_0a9afd;
+function Demo() {
+  const [sel, setSel] = React.useState("fast");
+  return (
+    <div>
+      <div className="lbl">Badge</div>
+      <div className="row">
+        <Badge kind="processing">Processing</Badge>
+        <Badge kind="success">Complete</Badge>
+        <Badge kind="warning">Low confidence</Badge>
+        <Badge kind="error">Failed</Badge>
+      </div>
+      <div className="lbl">Tag</div>
+      <div className="row">
+        <Tag selected={sel==="fast"} onClick={() => setSel("fast")}>Fast (pdfplumber)</Tag>
+        <Tag selected={sel==="ocr"} onClick={() => setSel("ocr")}>Full OCR</Tag>
+      </div>
+      <div className="lbl">Tooltip (hover)</div>
+      <div className="row">
+        <Tooltip label="Download UIR JSON"><IconButton label="Download" icon={<svg width="16" height="16" viewBox="0 0 16 16"><path d="M8 1v9m0 0l-3-3m3 3l3-3M2 13h12" stroke="currentColor" strokeWidth="1.5" fill="none"/></svg>} /></Tooltip>
+      </div>
+      <div className="lbl">Toast</div>
+      <div className="row" style={{width:"100%"}}>
+        <Toast action={<Button variant="primary">View</Button>}>3 documents processed</Toast>
+      </div>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<Demo />);
+</script>
+</body></html>

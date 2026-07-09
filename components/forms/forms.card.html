@@ -1,0 +1,49 @@
+<!-- @dsCard group="Components" viewport="700x460" name="Forms" subtitle="Button, IconButton, Input, Select, Checkbox, Radio, Switch" -->
+<html><head>
+<link rel="stylesheet" href="../../styles.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+<style>body{margin:0;padding:20px;background:var(--surface-canvas);font-family:var(--font-text)}
+.row{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
+.lbl{font-size:11px;color:var(--text-muted-48);width:100%;margin-bottom:-4px}
+</style>
+</head><body>
+<div id="root"></div>
+<script type="text/babel">
+const { Button, IconButton, Input, Select, Checkbox, Radio, Switch } = window.ApertureDesignSystem_0a9afd;
+function Demo() {
+  const [checked, setChecked] = React.useState(true);
+  const [radio, setRadio] = React.useState("a");
+  const [sw, setSw] = React.useState(true);
+  return (
+    <div>
+      <div className="lbl">Button</div>
+      <div className="row">
+        <Button variant="primary">Buy</Button>
+        <Button variant="secondary-pill">Learn more</Button>
+        <Button variant="dark-utility">Sign In</Button>
+        <Button variant="pearl-capsule">Compare</Button>
+        <Button variant="store-hero">Get started</Button>
+        <Button variant="primary" disabled>Buy</Button>
+      </div>
+      <div className="lbl">IconButton · Input · Select</div>
+      <div className="row">
+        <IconButton label="Close" icon={<svg width="16" height="16" viewBox="0 0 16 16"><path d="M2 2l12 12M14 2L2 14" stroke="currentColor" strokeWidth="1.6"/></svg>} />
+        <div style={{width:220}}><Input variant="pill" placeholder="Search accessories" /></div>
+        <div style={{width:160}}><Select options={[{value:"en",label:"English"},{value:"es",label:"Spanish"}]} value="en" /></div>
+      </div>
+      <div className="lbl">Checkbox · Radio · Switch</div>
+      <div className="row">
+        <Checkbox checked={checked} onChange={setChecked} label="Skip Weaviate upsert" />
+        <Radio checked={radio==="a"} onChange={() => setRadio("a")} label="Fast path" />
+        <Radio checked={radio==="b"} onChange={() => setRadio("b")} label="Full OCR" />
+        <Switch checked={sw} onChange={setSw} label="Generate embeddings" />
+      </div>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<Demo />);
+</script>
+</body></html>
