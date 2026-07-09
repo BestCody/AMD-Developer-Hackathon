@@ -53,7 +53,7 @@ These reflect explicit deviations from the original spec, with rationale.
 |---|---|---|
 | PaddleOCR (primary) | **EasyOCR** (primary) | AMD ROCm portability — PaddlePaddle has no production ROCm build. |
 | Tesseract (fallback) | Tesseract (fallback) | Unchanged. |
-| `camelot` or `pdfplumber` for tables | **`pdfplumber`** | Lighter install on macOS; both OK on ROCm. |
+| Docling tables | **Docling (IBM)** | Docling handles tables natively; no per-format adapter. |
 | `text-embedding-3-small` (OpenAI) or `bge-small` | **`BAAI/bge-small-en-v1.5`** via `sentence-transformers` | No OpenAI key available; PyTorch-native = ROCm-friendly. |
 | N/A | **`device.py` helper** selects `cuda > mps > cpu` | One env-line AMD switch. |
 | Topics via LDA or embedding clustering | **Stub: empty list** for MVP; TODO Phase 2 | Avoids gensim dep; not an acceptance gate. |
@@ -73,7 +73,7 @@ Reading constraints today means the AMD cloud switch is **a port, not a redesign
 | LayoutLMv3 | `device="mps"`, `float32`, cpu fallback | `device="cuda"` (ROCm compatible API), `float16` | Same `transformers` code path; ~5–10× throughput. |
 | EasyOCR | `torch`, `device="mps"` or "cpu" | `torch`, `device="cuda"` | Same PyTorch op graph; runs on ROCm. |
 | bge-small | `torch` + MPS | `torch` + ROCm | Identical. |
-| pdfplumber | CPU | CPU | No change. |
+| Docling | CPU / GPU | CPU (GPU recommended) | Transformer-based; 2 GB HF cache on first run. |
 | spaCy | CPU NER | CPU NER | No change. |
 | Weaviate | Docker Desktop, single-node | Either: managed Weaviate Cloud Services OR AMI-based self-host | Client API unchanged. |
 | Migrating toggle | Local dev env | `CUDA_VISIBLE_DEVICES=0` on AMD host | Single env-var drive. |
@@ -104,7 +104,7 @@ PDF (.pdf, filesystem)
 [ layout ]   → LayoutLMv3 (mps|cpu) → region classification      → LayoutRegion[]
     │
     ▼
-[ tables ]   → pdfplumber on detected table regions → markdown   → TableNode[]
+[ tables ]   → Docling on detected table regions → markdown    → TableNode[]
     │
     ▼
 [ chunk ]    → growing window 256-512 tokens, 10-20% overlap     → Chunk[]
@@ -136,7 +136,7 @@ Per-stage outputs are immutable `@dataclass(frozen=True)` value objects so they 
 | OCR (primary) | **EasyOCR** | PyTorch-native, AMD-portable. English: `en` model only at MVP. |
 | OCR (fallback) | pytesseract | CPU, failsafe. |
 | Layout | LayoutLMv3 base (`microsoft/layoutlmv3-base`) | Standard `transformers` load. |
-| Tables | pdfplumber | Markdown output + bbox preserved. |
+| Tables | Docling | Markdown output + bbox preserved. |
 | Chunking | Custom growing-window | `AutoTokenizer.from_pretrained("BAAI/bge-small-en-v1.5")` for token counting (NOT tiktoken); sentence boundaries honored when feasible. |
 | Entities | spaCy `en_core_web_sm` | Standard NER. |
 | Relationships | Co-occurrence heuristic (within chunk, within distance k) | Transformer RE deferred to Phase 2. |

@@ -43,11 +43,16 @@ _DEFAULT_LANGUAGE: Final[str] = "en"
 
 @dataclass(frozen=True)
 class DocumentInput:
-    """Result of ingesting a raw PDF file on disk.
+    """Result of ingesting a raw document file on disk.
 
     Field names mirror UIR ``Source`` + ``Metadata`` so Phase L can map
     directly without translation. All fields are populated from the
     file -- none are inferable from each other.
+
+    PLAN §17 §Multi-format widens the contract from PDF-only to any
+    supported format. ``format`` and ``route`` are populated by the
+    per-format ingress module (kept on the dataclass so legacy PDF-only
+    callers see ``format="PDF"`` / ``route="pdf"`` for free).
 
     Note: ``source_path`` is the path the user provided (possibly a
     string), while ``uri`` is ``pathlib.Path.resolve().as_uri()`` -- the
@@ -64,6 +69,10 @@ class DocumentInput:
     created: datetime | None
     modified: datetime | None
     page_count: int
+    # PLAN §17 §Multi-format. Defaults preserve legacy v1 behaviour for
+    # every existing PDF-only test / caller.
+    format: str = "PDF"
+    route: str | None = None
 
     def to_uir_source_metadata(self) -> tuple[Any, Any]:
         """Return ``(Source, Metadata)`` Pydantic models ready for UIRV1.
@@ -73,6 +82,10 @@ class DocumentInput:
         import here would force eager schema load wherever ``ingest``
         is referenced (e.g. orchestrator).
 
+        PLAN §17 §Multi-format: ``Source.format`` + ``Source.route``
+        mirror this dataclass. ``Metadata.format`` mirrors it too so
+        JSON consumers can pivot on a single field without joining.
+
         Defaults:
             -- ``title`` falls back to ``"(untitled)"`` so the UIR schema's
                non-null ``title: str`` constraint is always satisfied.
@@ -80,10 +93,13 @@ class DocumentInput:
             -- ``domain`` stays ``None`` (Phase J may fill).
         """
         from uir_pipeline.uir_schema import Source, Metadata
+        from uir_pipeline.format_router import source_format_label
+        fmt_label = source_format_label(self.format)
         return (
             Source(
                 uri=self.uri,
-                format="PDF",
+                format=fmt_label,
+                route=self.route,
                 mime_type=self.mime_type,
                 size_bytes=self.size_bytes,
                 checksum=f"sha256:{self.sha256}",
@@ -97,6 +113,7 @@ class DocumentInput:
                 page_count=self.page_count,
                 language=_DEFAULT_LANGUAGE,
                 domain=None,
+                format=fmt_label,
             ),
         )
 
@@ -183,40 +200,50 @@ def _datetime_or_none(info: Any, attr_name: str) -> datetime | None:
 # ----------------------------------------------------------------------------
 
 def ingest(path: str | Path) -> DocumentInput:
-    """Validate, hash, and extract metadata from a PDF file.
+        """Validate, hash, and extract metadata from a PDF file.
 
-    Raises:
-        FileNotFoundError: ``path`` does not exist (or is not a regular file).
-        ValueError: file is not a PDF (magic-byte prefix missing).
-        RuntimeError: ``pypdf`` fails to parse the file (corrupted / encrypted).
-    """
-    p = Path(path).expanduser()
-    if not p.is_file():
-        raise FileNotFoundError(f"{p} is not a regular file")
-    if not detect_pdf_magic_bytes(p):
-        raise ValueError(
-            f"{p.name} is not a PDF (magic bytes %PDF-<version> absent "
-            f"in first {_PDF_MAGIC_PREFIX_LEN} bytes)"
+        PLAN §17 §Multi-format: this function remains the PDF-specific
+        ingress. Non-PDF formats route through dedicated ingress modules
+        (``src/uir_pipeline/ingest_rtf.py`` for RTF, per-format Docling
+        callers for DOCX/PPTX/XLSX/HTML/EPUB/LaTeX/IPYNB). The orchestrator
+        (:func:`src.uir_pipeline.pipeline.run`) is the dispatcher -- it
+        reads ``format_router.route(path)`` first and only calls ``ingest``
+        when the route is ``FormatRoute.PDF``.
+
+        Raises:
+            FileNotFoundError: ``path`` does not exist (or is not a regular file).
+            ValueError: file is not a PDF (magic-byte prefix missing).
+            RuntimeError: ``pypdf`` fails to parse the file (corrupted / encrypted).
+        """
+        p = Path(path).expanduser()
+        if not p.is_file():
+            raise FileNotFoundError(f"{p} is not a regular file")
+        if not detect_pdf_magic_bytes(p):
+            raise ValueError(
+                f"{p.name} is not a PDF (magic bytes %PDF-<version> absent "
+                f"in first {_PDF_MAGIC_PREFIX_LEN} bytes)"
+            )
+
+        sha = compute_sha256(p)
+        meta = extract_pdf_metadata(p)
+        size = p.stat().st_size
+        ts = datetime.now(timezone.utc)
+
+        return DocumentInput(
+            source_path=p,
+            uri=p.resolve().as_uri(),
+            mime_type=PDF_MIME_TYPE,
+            size_bytes=size,
+            sha256=sha,
+            timestamp=ts,
+            title=meta["title"],
+            author=meta["author"],
+            created=meta["created"],
+            modified=meta["modified"],
+            page_count=meta["page_count"],
+            format="PDF",
+            route="pdf",
         )
-
-    sha = compute_sha256(p)
-    meta = extract_pdf_metadata(p)
-    size = p.stat().st_size
-    ts = datetime.now(timezone.utc)
-
-    return DocumentInput(
-        source_path=p,
-        uri=p.resolve().as_uri(),
-        mime_type=PDF_MIME_TYPE,
-        size_bytes=size,
-        sha256=sha,
-        timestamp=ts,
-        title=meta["title"],
-        author=meta["author"],
-        created=meta["created"],
-        modified=meta["modified"],
-        page_count=meta["page_count"],
-    )
 
 
 __all__ = [

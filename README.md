@@ -22,9 +22,9 @@ PDF (file or directory)
           │
           ▼
 ┌──────────────────────────────────────────────────────────┐
-│  ingest  → pdfplumber text (fast path) ── DetectedWord[] │
+│  ingest  → IBM Docling transformer ── DoclingDocument ── typed regions │
 │           → LayoutClassifier (heuristic, 4 labels)       │
-│           → tables (pdfplumber) → markdown               │
+│           → tables (Docling) → markdown                 │
 │           → chunks (BGE tokenizer, ~256 tokens, overlap) │
 │           → enrich (spaCy NER + co-occurrence)           │
 │           → embed  (BAAI/bge-small-en-v1.5, 384-d)       │
@@ -36,7 +36,7 @@ PDF (file or directory)
 out/{doc_id}.uir.json   +   Weaviate: chunks + parent doc
 ```
 
-The orchestrator's text-extraction fast path uses **pdfplumber** instead
+The orchestrator's text-extraction path uses IBM Docling -- a
 of real OCR; one-line swap behind `_get_page_text()` if you want EasyOCR
 primary / Tesseract fallback.
 

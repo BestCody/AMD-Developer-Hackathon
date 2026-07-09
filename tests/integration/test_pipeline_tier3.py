@@ -105,7 +105,6 @@ def test_pipeline_emits_figure_chunk_with_image_b64_full(tmp_path: Path, monkeyp
     figure ChunkNode with non-empty ``text`` AND a base64-decodable PNG
     crop persisting onto ``modal_features.figure.image_b64``.
     """
-    pytest.importorskip("pdfplumber")
     pytest.importorskip("pymupdf")
     _ensure_fixture_present()
     if not FIXTURE_PATH.is_file():

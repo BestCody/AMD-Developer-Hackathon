@@ -8,6 +8,7 @@
   const fileLabel = $("#file-label");
   const runBtn = $("#run-btn");
   const intentInput = $("#intent-input");
+  const formatPill = $("#format-pill");
   const drop = document.querySelector(".file-drop");
   const statusSection = $("#status-section");
   const stageText = $("#stage-text");
@@ -90,9 +91,78 @@
     setActiveView("json");
   });
 
+  // PLAN §17 §Multi-format follow-up: the upload form now accepts a
+  // dozen+ formats -- the friendly hint appended to the file label
+  // gives the user immediate feedback ("XLSX (Excel)" instead of an
+  // ambiguous "X" if they pick a spreadsheet). The map is a subset of
+  // ``format_router.SUPPORTED_EXTENSIONS`` -- not exhaustive on
+  // purpose, because the orchestrator's ``format_router`` is the
+  // authoritative classifier and any unknown extension falls through
+  // to its magic-byte table anyway.
+  const FORMAT_HINTS = {
+    ".pdf":  "PDF",
+    ".docx": "Word document",
+    ".doc":  "Word (legacy binary)",
+    ".pptx": "PowerPoint",
+    ".ppt":  "PowerPoint (legacy binary)",
+    ".xlsx": "Excel",
+    ".xls":  "Excel (legacy binary)",
+    ".epub": "EPUB e-book",
+    ".html": "HTML",
+    ".htm":  "HTML",
+    ".tex":  "LaTeX",
+    ".ipynb": "Jupyter notebook",
+    ".png":  "image",
+    ".jpg":  "image",
+    ".jpeg": "image",
+    ".tif":  "image",
+    ".tiff": "image",
+    ".bmp":  "image",
+    ".gif":  "image",
+    ".webp": "image",
+    ".txt":  "text",
+    ".md":   "Markdown",
+    ".markdown": "Markdown",
+    ".csv":  "CSV",
+    ".tsv":  "TSV",
+    ".rtf":  "RTF",
+    ".json": "JSON",
+    ".yaml": "YAML",
+    ".yml":  "YAML",
+    ".xml":  "XML",
+  };
+  function clientFormatHint(name) {
+    const lower = (name || "").toLowerCase();
+    const dot = lower.lastIndexOf(".");
+    if (dot < 0) return "auto-detect (no extension)";
+    return FORMAT_HINTS[lower.slice(dot)] || "auto-detect";
+  }
+
+  // Friendly route labels -- maps the internal ``FormatRoute.value``
+  // enum strings to names a non-engineer can read. Falls back to the
+  // raw route name (uppercased) if it's something we don't recognize,
+  // so a future route addition doesn't break the UI.
+  const ROUTE_LABELS = {
+    pdf:     "PDFplumber",
+    docling: "Docling",
+    pptx:    "Native PPTX walker",
+    text:    "Text walker",
+    image:   "Fireworks AI vision",
+    skip:    "skipped",
+  };
+  function friendlyRoute(route) {
+    if (!route) return "unknown";
+    return ROUTE_LABELS[route] || String(route);
+  }
+
   function setFile(file) {
-    if (!file) { runBtn.disabled = true; fileLabel.textContent = "Click to choose a PDF"; return; }
-    fileLabel.textContent = `Selected: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+    if (!file) {
+      runBtn.disabled = true;
+      fileLabel.textContent = "Click to choose a document";
+      return;
+    }
+    const hint = clientFormatHint(file.name);
+    fileLabel.textContent = `Selected: ${file.name} (${(file.size / 1024).toFixed(1)} KB) — ${hint}`;
     runBtn.disabled = false;
   }
 
@@ -185,6 +255,46 @@
     return `${baseText} · ${intentSummary.matched_chunks} of ${intentSummary.total_chunks} chunks (intent: "${intentSummary.query}"; ${kw})${fallback}`;
   }
 
+  // PLAN §17 §Multi-format follow-up: populate the format / route pill
+  // in the result bar. We prefer the live UIR JSON's top-level
+  // ``source`` field (``uirDoc.source.format`` + ``uirDoc.source.route``)
+  // so the pill is always consistent with the document. The
+  // ``/api/status`` payload's ``result.source_format`` /
+  // ``result.source_route`` keys are a fallback for the brief window
+  // when ``/api/result`` hasn't returned yet.
+  function populateFormatPill(uirDoc, meta) {
+    if (!formatPill) return;
+    const sourceInfo = (uirDoc && uirDoc.source) || null;
+    const format = (sourceInfo && sourceInfo.format) ||
+                   (meta && meta.source_format) || "";
+    const route = (sourceInfo && sourceInfo.route) ||
+                  (meta && meta.source_route) || "";
+    if (!format && !route) {
+      formatPill.classList.add("hidden");
+      return;
+    }
+    const formatLabel = format || "?";
+    const routeLabel = friendlyRoute(route);
+    // Build the pill as: "PDF · PDFplumber" (or "PPTX · Native PPTX
+    // walker", etc.). Plain textContent -- the user can right-click
+    // the pill and copy it. The data-route attribute drives the CSS
+    // left-border stripe so colour follows the route.
+    formatPill.dataset.route = route || "unknown";
+    formatPill.textContent = "";
+    const formatSpan = document.createElement("span");
+    formatSpan.textContent = formatLabel;
+    const sepSpan = document.createElement("span");
+    sepSpan.className = "format-pill__sep";
+    sepSpan.textContent = " · ";
+    const routeSpan = document.createElement("span");
+    routeSpan.className = "format-pill__route";
+    routeSpan.textContent = routeLabel;
+    formatPill.appendChild(formatSpan);
+    formatPill.appendChild(sepSpan);
+    formatPill.appendChild(routeSpan);
+    formatPill.classList.remove("hidden");
+  }
+
   async function renderResult(meta) {
     if (!currentJobId) return;
     // Fetch the UMR companion file (Phase 17 -- agent-facing view) and
@@ -201,6 +311,7 @@
       if (r.ok) uirDoc = await r.json();
     } catch (e) { /* swallow; JSON view will be empty until tab click */ }
     lastUirDoc = uirDoc;
+    populateFormatPill(uirDoc, meta);
     const intentSummary = lastStatus && lastStatus.intent;
 
     if (umrText) {
@@ -227,6 +338,7 @@
       // Back-compat: UMR endpoint missing \u2014 fall through to JSON-only
       // rendering so the UI never breaks when the WSGI server is older.
       if (uirDoc) {
+        populateFormatPill(uirDoc, meta);
         const id = uirDoc.id || (meta && meta.uir_id) || "unknown";
         const title = (uirDoc.metadata && uirDoc.metadata.title) || "";
         const nChunks = (uirDoc.structure && uirDoc.structure.root &&
@@ -262,6 +374,11 @@
       if (r.ok) {
         lastUirDoc = await r.json();
         jsonOutput.textContent = JSON.stringify(lastUirDoc, null, 2);
+        // The JSON tab may be opened after the initial UMR-driven
+        // renderResult already populated the pill -- if the pill
+        // hasn't been populated yet (e.g. UMR was missing and we fell
+        // through to the JSON-only path), populate it now.
+        populateFormatPill(lastUirDoc, lastStatus && lastStatus.result);
       } else {
         jsonOutput.textContent = `HTTP ${r.status}: ${await r.text()}`;
       }

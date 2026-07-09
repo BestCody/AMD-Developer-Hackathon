@@ -200,12 +200,13 @@ def create_app(
                     with jobs_lock:
                         job.stage_meta = dict(meta)
 
-            result = _pipeline_mod.run(
-                job.upload_path,
-                output_dir=app.config["OUTPUT_DIR"],
+            result = _pipeline_mod.run(                  job.upload_path,
+                  fast_path="docling",  # web pins Docling (single backend; docling failures propagate)
+                  output_dir=app.config["OUTPUT_DIR"],
                 skip_weaviate=True,        # web UX: skip Weaviate by default
                 with_embeddings=True,
                 on_progress=_on_progress,
+                intent=job.intent,
             )
             _advance(job, JOB_RUNNING, "done", 100, lock=jobs_lock)
             with jobs_lock:
@@ -231,6 +232,34 @@ def create_app(
                     "entity_count": int(getattr(result, "entity_count", 0)),
                     "elapsed_seconds": float(getattr(result, "elapsed_seconds", 0.0)),
                 }
+                # PLAN §17 §Multi-format follow-up: surface the resolved
+                # source format + extraction route so the front-end can
+                # render a "PDF via Docling", "PPTX via Native Walker",
+                # etc. pill in the result bar without a second fetch.
+                # The UIR JSON's top-level ``source`` field is the
+                # source of truth (see :class:`uir_pipeline.uir_schema
+                # .Source`); we read it here so the format label is
+                # available the moment ``/api/status`` flips to ``done``.
+                # Best-effort: a partial / malformed UIR must not
+                # poison the job (the front-end will simply omit the
+                # pill).
+                try:
+                    uir_doc = json.loads(job.uir_path.read_text())
+                    source_meta = (uir_doc.get("source") or {}) \
+                        if isinstance(uir_doc, dict) else {}
+                    job.result["source_format"] = str(
+                        source_meta.get("format") or "UNKNOWN"
+                    )
+                    job.result["source_route"] = str(
+                        source_meta.get("route") or "unknown"
+                    )
+                except Exception as exc:  # noqa: BLE001 -- best-effort
+                    logger.warning(
+                        "could not read UIR source for job %s: %s",
+                        job.job_id, exc,
+                    )
+                    job.result.setdefault("source_format", "UNKNOWN")
+                    job.result.setdefault("source_route", "unknown")
                 # Tier 1.5 + web: if an intent was supplied, post-process
                 # the freshly-written UIR JSON so the front-end can fetch a
                 # narrowed ``/api/result`` payload. ``intent_filter`` is a
@@ -327,11 +356,36 @@ def create_app(
         upload = request.files["file"]
         if not upload.filename:
             abort(400, description="empty filename")
-        if not upload.filename.lower().endswith(".pdf"):
-            abort(400, description="only .pdf files are accepted")
+        # PLAN §17 §Multi-format follow-up: the pipeline now routes a
+        # dozen+ formats through PDF / DOCLING / PPTX_NATIVE / TEXT /
+        # IMAGE -- the upload form should accept everything the
+        # orchestrator can ingest. We use the format_router's canonical
+        # SUPPORTED_EXTENSIONS list as the source of truth so a future
+        # format addition is a one-line change.
+        from uir_pipeline.format_router import SUPPORTED_EXTENSIONS
+        # Path(...).name strips any directory components a malicious
+        # client might have inserted (the FileStorage.filename is taken
+        # from the multipart Content-Disposition verbatim). ``suffix``
+        # then yields the literal lowercased extension or ``""`` if the
+        # upload has none.
+        safe_name = Path(upload.filename).name
+        ext = Path(safe_name).suffix.lower()
+        if ext not in SUPPORTED_EXTENSIONS:
+            abort(400, description=(
+                f"unsupported file type {ext!r}; supported: "
+                f"{', '.join(sorted(SUPPORTED_EXTENSIONS))}"
+            ))
 
         job_id = uuid.uuid4().hex
-        saved = upload_dir / f"{job_id}.pdf"
+        # Preserve the original extension on disk so :func:`format_router
+        # .detect_format`'s extension-fallback can still resolve a label
+        # when magic bytes are ambiguous (e.g. text / markdown / code
+        # files share the same "no magic" signature). The
+        # ``format_router`` is robust to a missing extension because
+        # the orchestrator re-derives the format from magic bytes, but
+        # keeping the suffix is cheap and gives operators a clear hint
+        # in the upload directory listing.
+        saved = upload_dir / f"{job_id}{ext}"
         upload.save(saved)
 
         # Optional intent: a free-text reader-mode query.  Blank / missing

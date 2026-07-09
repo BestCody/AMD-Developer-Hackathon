@@ -105,11 +105,13 @@ def fake_run_intent(monkeypatch, tmp_path: Path):
     calls: list[dict] = []
 
     def _fake(input_path, output_dir, *, skip_weaviate=False, dry_run=False,
-              with_embeddings=True, on_progress=None, page_numbers=None):
+              with_embeddings=True, on_progress=None, page_numbers=None,
+              fast_path=None):
         calls.append({
             "input_path": str(input_path),
             "skip_weaviate": skip_weaviate,
             "with_embeddings": with_embeddings,
+            "fast_path": fast_path,
         })
         for stage, pct in [
             ("ingest", 5), ("extract_text", 20), ("synthesize_ocr", 30),
@@ -183,6 +185,7 @@ class TestJobIntentField:
         assert final["intent"] is not None
         assert final["intent"]["query"] == "show me attention"
         assert "attention" in final["intent"]["keywords"]
+        assert fake_run_intent[-1]["fast_path"] == "docling"  # web pins Docling regardless of UIR_FAST_PATH env
 
     def test_blank_intent_keeps_job_intent_none(self, client_intent, tmp_path):
         pdf = tmp_path / "x.pdf"

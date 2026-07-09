@@ -48,8 +48,8 @@ _LABEL_MAP: dict[str, str] = {
     "subtitle": "heading",
     "text": "paragraph",
     "paragraph": "paragraph",
-    "list_item": "list_item",
-    "list": "list_item",
+    "list_item": "list",
+    "list": "list",
     "table": "table",
     "figure": "figure",
     "picture": "figure",
@@ -72,6 +72,7 @@ class DoclingResult:
     regions: list[dict[str, Any]] = field(default_factory=list)
     tables: list[dict[str, Any]] = field(default_factory=list)
     page_texts: list[tuple[int, str]] = field(default_factory=list)
+    pictures: list[dict[str, Any]] = field(default_factory=list)
 
 
 class DoclingUnavailable(RuntimeError):
@@ -245,6 +246,7 @@ def _walk_doc(doc: Any) -> DoclingResult:
     regions: list[dict[str, Any]] = []
     tables: list[dict[str, Any]] = []
     page_texts: list[tuple[int, str]] = []
+    pictures: list[dict[str, Any]] = []
 
     # First pass: tables (Docling carries them as a top-level collection
     # in addition to embedding them in the page stream; emit once so
@@ -321,7 +323,33 @@ def _walk_doc(doc: Any) -> DoclingResult:
                 text_buffer.append(text)
         page_texts.append((page_no, "\n\n".join(text_buffer)))
 
-    return DoclingResult(regions=regions, tables=tables, page_texts=page_texts)
+    # Third pass: pictures/figures. Docling exposes them via either
+    # ``doc.pictures`` (top-level collection) or page-level items. We
+    # duck-type -- the bbox is already 0-1000-clamped by ``_bbox_xyxy``.
+    seen_pic_keys: set[tuple[int, tuple]] = set()
+    picture_items = list(getattr(doc, "pictures", None) or [])
+    for pi in picture_items:
+        try:
+            bb = _bbox_xyxy(
+                getattr(getattr(pi, "prov", None), "bbox", None)
+            )
+        except Exception:  # noqa: BLE001
+            bb = (0, 0, 0, 0)
+        pg = _page_number(pi, fallback=1)
+        key = (pg, bb)
+        if key in seen_pic_keys or bb == (0, 0, 0, 0):
+            continue
+        seen_pic_keys.add(key)
+        pictures.append({
+            "page": pg,
+            "bbox": bb,
+            "bbox_pixel": bb,  # already 0-1000 (no pdfplumber coords)
+            "kind": "picture",
+        })
+    return DoclingResult(
+        regions=regions, tables=tables, page_texts=page_texts,
+        pictures=pictures,
+    )
 
 
 def docling_environment_enabled() -> bool:

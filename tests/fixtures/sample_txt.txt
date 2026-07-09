@@ -1,0 +1,5 @@
+First paragraph of the plain text fixture. It contains several words.
+
+Second paragraph follows on a new line. Multimedia references kept literal.
+
+Third paragraph closes out the example. End of fixture.

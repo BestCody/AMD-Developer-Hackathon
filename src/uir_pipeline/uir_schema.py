@@ -145,11 +145,37 @@ def _enforce_id_prefix(entity_id: str, expected_prefix: str, entity_type: str) -
 # ----------------------------------------------------------------------------
 
 class Source(BaseModel):
-    """Document source descriptor (Phase 1: PDF files)."""
+    """Document source descriptor.
+
+    ``format`` is widened from ``Literal["PDF"]`` to ``str`` (PLAN §17
+    §Multi-format) so DOCX/PPTX/XLSX/HTML/EPUB/LaTeX/IPYNB/RTF/TXT/MD/CSV/
+    image/code can flow through the same UIR contract without per-format
+    schema churn. Per-format validation is delegated to ``format_router``
+    which classifies the file at ingest time. ``route`` records the
+    extraction route chosen for this document so downstream consumers
+    can reconstruct provenance. Both new fields default to ``None`` /
+    legacy ``"PDF"`` so pre-§17 v1 UIRs remain valid.
+    """
     model_config = ConfigDict(extra="forbid")
 
     uri: str = Field(..., description="Source URI (e.g. s3://, file://, https://).")
-    format: Literal["PDF"] = "PDF"
+    format: str = Field(
+        default="PDF",
+        description=(
+            "Format of the source document. Phase 1 was ``PDF`` only; "
+            "Phase 17+ allows DOCX/PPTX/XLSX/HTML/EPUB/LaTeX/IPYNB/RTF/"
+            "TXT/MD/CSV/IMAGE/code. Validation deferred to "
+            "``format_router.classify_route`` at ingest."
+        ),
+    )
+    route: str | None = Field(
+        default=None,
+        description=(
+            "Extraction route dispatched by ``format_router``. One of "
+            "``pdf``, ``docling``, ``text``, ``image``, ``skip``. "
+            "Optional for backwards compatibility with pre-§17 UIRs."
+        ),
+    )
     mime_type: str = Field(..., description="IANA MIME type (e.g. application/pdf).")
     size_bytes: int = Field(..., ge=0, description="File size in bytes.")
     checksum: str = Field(
@@ -162,7 +188,14 @@ class Source(BaseModel):
 
 
 class Metadata(BaseModel):
-    """PDF / document metadata."""
+    """Document metadata (PDF + multi-format Phase 17+).
+
+    ``page_count`` remains required (gte 0); for pageless formats
+    (TXT/MD/code/CSV with no native page concept) the caller synthesises
+    ``page_count=1`` via :func:`src.uir_pipeline.chunk.paginate_pageless`.
+    ``format`` mirrors :attr:`Source.format` so JSON consumers can
+    pivot on a single field without joining.
+    """
     model_config = ConfigDict(extra="forbid")
 
     title: str
@@ -176,6 +209,13 @@ class Metadata(BaseModel):
     domain: str | None = Field(
         default=None,
         description="Inferred document domain (e.g. 'financial'), or null.",
+    )
+    format: str | None = Field(
+        default=None,
+        description=(
+            "Mirror of ``Source.format`` for convenience. None when the "
+            "UIR was emitted by pre-§17 code paths (legacy PDFs only)."
+        ),
     )
 
 
@@ -350,7 +390,7 @@ class UIRV1(BaseModel):
             "shape here to allow upstream UUID library upgrades."
         ),
     )
-    modal_type: Literal["document"] = "document"
+    modal_type: Literal["document", "image"] = "document"
     source: Source
     metadata: Metadata
     structure: Structure

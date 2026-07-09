@@ -433,11 +433,74 @@ def chunks_from_regions(
     return out
 
 
+# ----------------------------------------------------------------------------
+# Pageless pagination (PLAN §17 §Multi-format)
+# ----------------------------------------------------------------------------
+# Pageless formats (TXT/MD/code/CSV/RTF) have no native page concept but
+# downstream Stages 4-11 key on ``page=`` for position semantics, BGE
+# chunk overlap stitching, and section_path tracing. We synthesise pages
+# here at a ``DEFAULT_PAGELESS_PAGE_TOKENS`` token budget, splitting
+# strictly on paragraph boundaries so a structural heading never ends up
+# stranded in a window with one orphan line.
+DEFAULT_PAGELESS_PAGE_TOKENS: Final[int] = 2000
+
+
+def paginate_pageless(
+    text: str,
+    *,
+    max_tokens: int = DEFAULT_PAGELESS_PAGE_TOKENS,
+    model_id: str = DEFAULT_BGE_MODEL,
+) -> list[tuple[int, str]]:
+    """Split ``text`` into ``[(page_number, joined_text), ...]``.
+
+    Each window holds roughly ``max_tokens`` BGE tokens, sliced on
+    paragraph breaks (``\\n\\n``) so single-paragraph ``\\n`` wraps stay
+    intact. A single oversized paragraph is always absorbed whole
+    (``len(pages) >= 1``); splitting mid-paragraph would break the
+    downstream chunker's overlap-stitch logic. Page numbers are
+    1-based to match the existing PDF contract; an empty / whitespace
+    input returns ``[]``.
+
+    Used by:
+        -- :mod:`src.uir_pipeline.ingest_rtf` (RTF after striprtf decode)
+        -- the new ``pipeline._run_text_route`` branch for TXT/MD/code/CSV
+        -- direct callers in tests (unit-tested via
+           ``tests/test_paginate_pageless.py``).
+    """
+    if not text or not text.strip():
+        return []
+    paragraphs = _split_into_paragraphs(text)
+    if not paragraphs:
+        return []
+    pages: list[tuple[int, str]] = []
+    cur_paras: list[str] = []
+    cur_tokens = 0
+    page_idx = 1
+    for para in paragraphs:
+        para_tokens = count_tokens(para, model_id=model_id)
+        # Roll a new page when adding this paragraph would exceed
+        # ``max_tokens`` AND we already have content on the current
+        # page. Empty pages absorb any single oversized paragraph so
+        # we never infinite-loop on a 50k-token blob.
+        if cur_paras and (cur_tokens + para_tokens) > max_tokens:
+            pages.append((page_idx, "\n\n".join(cur_paras)))
+            page_idx += 1
+            cur_paras = []
+            cur_tokens = 0
+        cur_paras.append(para)
+        cur_tokens += para_tokens
+    if cur_paras:
+        pages.append((page_idx, "\n\n".join(cur_paras)))
+    return pages
+
+
 __all__ = [
+    "DEFAULT_PAGELESS_PAGE_TOKENS",
     "ChunkDraft",
     "MAX_CHUNK_TOKENS",
     "MIN_CHUNK_TOKENS",
     "chunk_text",
     "chunks_from_regions",
+    "paginate_pageless",
     "_split_sentences",
 ]

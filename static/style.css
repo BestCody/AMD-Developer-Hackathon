@@ -209,6 +209,47 @@ section { margin-top: 22px; }
   border-left: 3px solid var(--accent);
 }
 
+/* Format/route pill -- PLAN §17 §Multi-format follow-up: surfaces the
+   resolved ``source.format`` and ``source.route`` from the UIR JSON so
+   the user can see which extractor handled their document (PDFplumber
+   vs Docling vs the native PPTX walker vs Florence-2 captions, etc.).
+   A 3px left-border stripe carries the route color while the body
+   stays subtle glass-card styling -- it stays legible at any width
+   and reads as a tag, not a button. The ``data-route`` attribute is
+   the single source of truth for the color mapping (also set by
+   ``app.js`` so the route label can update after the result is
+   fetched). */
+.format-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px 3px 9px;
+  margin-left: 6px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-left-width: 3px;
+  border-left-color: rgba(255, 255, 255, 0.18);
+  vertical-align: middle;
+  font-family: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, monospace;
+  color: var(--text-strong);
+  transition: border-left-color 0.18s ease, background 0.18s ease;
+}
+.format-pill__sep { color: var(--muted); font-weight: 500; }
+.format-pill__route { color: var(--muted); font-weight: 500; }
+/* Per-route left-border stripe. The choice of palette is intentionally
+   distinct from the existing ``--accent`` / ``--accent-2`` purple-blue
+   gradient so the pill never blends into the gradient title text. */
+.format-pill[data-route="pdf"]     { border-left-color: #ef4444; background: rgba(239, 68, 68, 0.08); }
+.format-pill[data-route="docling"] { border-left-color: #6ea8ff; background: rgba(110, 168, 255, 0.08); }
+.format-pill[data-route="pptx"]    { border-left-color: #fb923c; background: rgba(251, 146, 60, 0.08); }
+.format-pill[data-route="text"]    { border-left-color: #4ade80; background: rgba(74, 222, 128, 0.08); }
+.format-pill[data-route="image"]   { border-left-color: #c084fc; background: rgba(192, 132, 252, 0.08); }
+.format-pill[data-route="unknown"] { border-left-color: var(--muted); background: rgba(255, 255, 255, 0.04); }
+
 /* View-tab toggle group: UMR / UIR JSON. The .active variant keeps the
    bottom-border highlight + slightly elevated background so the chosen
    tab is unmistakable without a separate accent border on every state. */

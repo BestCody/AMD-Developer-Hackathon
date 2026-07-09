@@ -3,24 +3,26 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>UIR Pipeline — PDF Tester</title>
+  <title>UIR Pipeline — Document Tester</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
   <main class="card">
     <header>
-      <h1>UIR Pipeline <span class="muted">/ PDF tester</span></h1>
-      <p class="muted">Drop a PDF below and the local pipeline will run end-to-end: ingest → layout → tables → chunk → enrich → embed → assemble UIR v1.0 JSON.</p>
+      <h1>UIR Pipeline <span class="muted">/ document tester</span></h1>
+      <p class="muted">Drop a file below and the local pipeline will run end-to-end: ingest → route → extract → tables → chunk → enrich → embed → assemble UIR v1.0 JSON.</p>
     </header>
 
     <section class="upload">
       <label class="file-drop" for="file-input">
         <span class="file-drop__icon">⬆</span>
         <span class="file-drop__text">
-          <strong id="file-label">Click to choose a PDF</strong>
-          <small class="muted">max {{ max_upload_mb }}&nbsp;MB · .pdf only</small>
+          <strong id="file-label">Click to choose a document</strong>
+          <small class="muted">max {{ max_upload_mb }}&nbsp;MB · PDF · DOCX · PPTX · XLSX · EPUB · HTML · images · text</small>
         </span>
-        <input id="file-input" type="file" accept="application/pdf,.pdf" hidden>
+        <input id="file-input" type="file"
+               accept="application/pdf,.pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx,application/vnd.openxmlformats-officedocument.presentationml.presentation,.pptx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx,application/epub+zip,.epub,text/html,.html,.htm,text/plain,.txt,.md,.csv,.json,.yaml,.xml,image/*"
+               hidden>
       </label>
       <button id="run-btn" type="button" class="primary" disabled>Run pipeline</button>
     </section>
@@ -56,7 +58,10 @@
 
     <section id="result-section" class="result hidden">
       <div class="result__bar">
-        <h2 id="result-title">UIR v1.0 <span class="muted" id="result-summary"></span></h2>
+        <h2 id="result-title">UIR v1.0
+          <span id="format-pill" class="format-pill hidden" data-route=""></span>
+          <span class="muted" id="result-summary"></span>
+        </h2>
         <div class="result__actions">
           <div class="toggle-group" role="tablist" aria-label="Result view">
             <button id="view-umr-btn" type="button" class="active" role="tab" aria-selected="true">UMR</button>

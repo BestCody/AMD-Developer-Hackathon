@@ -41,8 +41,8 @@
 ```
 PDF page
   │
-  ├─ pdfplumber.page.extract_words()        # real bboxes (Tier 1)
-  ├─ pdfplumber.page.images                 # figure regions
+  ├─ IBM Docling transformer ── DoclingDocument.items (ordered, bbox on 0-1000)
+  ├─ IBM Docling PicPicItem walker ── dr.pictures (bbox on 0-1000)
   │     │
   │     └─ PyMuPDF.get_pixmap(clip=Rect)    # render PNG crop (Tier 2)
   │
@@ -97,7 +97,7 @@ Add `base64_png(pil_or_bytes)` helper (no deps beyond `base64` + `Pillow`). Reus
 
 ### `src/uir_pipeline/pipeline.py` (integrate after `tables`, before `chunk`)
 Insert between the existing "tables" stage and the "chunk" stage (~line 134 today):
-1. **Collect figure regions** from the page-words + page-images (`pdfplumber.Page.images`).
+1. **Collect figure regions** from `DoclingResult.pictures` (already on 0-1000).
 2. **Render crops** with PyMuPDF (Tier 2 dependency; add to `requirements.txt` if not present).
 3. **Caption** via `caption_images(pils, prompt=prompt)`.
 4. **Build figure chunks** with the caption as `text` + base64 PNG in `modal_features.image_b64`.

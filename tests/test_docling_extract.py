@@ -15,6 +15,7 @@ import pytest
 from uir_pipeline.docling_extract import (
     DoclingResult,
     DoclingUnavailable,
+    docling_environment_enabled,
     extract_with_docling,
 )
 
@@ -169,7 +170,7 @@ def test_extract_with_docling_shape_contract(tmp_path):
     # of the table (it's emitted only via ``tables``).
     assert len(result.regions) == 4
     labels = [r["label"] for r in result.regions]
-    assert labels == ["heading", "paragraph", "list_item", "paragraph"]
+    assert labels == ["heading", "paragraph", "list", "paragraph"]
     pages = [r["page"] for r in result.regions]
     assert pages == [1, 1, 1, 2]
 
@@ -271,22 +272,55 @@ def test_docling_to_table_draft_handles_empty_markdown():
     assert draft.col_count == 0
 
 
-def test_resolve_fast_path_explicit_arg_wins_over_env(monkeypatch):
-    """Explicit fast_path arg wins over UIR_FAST_PATH env var."""
-    from uir_pipeline.pipeline import _resolve_fast_path
+def test_resolve_fast_path_explicit_arg_wins_over_env(monkeypatch, caplog):
+    """Explicit fast_path arg wins over UIR_FAST_PATH env var.
 
-    monkeypatch.setenv("UIR_FAST_PATH", "docling")
-    assert _resolve_fast_path("pdfplumber") == "pdfplumber"
+    ``"pdfplumber"`` is now a deprecated alias for ``"docling"`` --
+    the resolver logs a one-shot warning and returns ``"docling"``.
+    The legal-value half (``"docling"`` arg + ``"pdfplumber"`` env)
+    keeps the strict "explicit arg wins over env" semantics.
+    """
+    from uir_pipeline.pipeline import _resolve_fast_path
+    import logging as _logging
+
+    # Alias case: explicit ``pdfplumber`` arg resolves to ``docling`` with
+    # a deprecation warning regardless of the env var.
+    with caplog.at_level(_logging.WARNING):
+        monkeypatch.setenv("UIR_FAST_PATH", "docling")
+        assert _resolve_fast_path("pdfplumber") == "docling"
+    assert any(
+        "deprecated" in r.message and "pdfplumber" in r.message
+        for r in caplog.records
+    )
+
+    # Legal-value case: explicit ``docling`` arg still wins, even when
+    # the env var says ``pdfplumber``.
+    caplog.clear()
     monkeypatch.setenv("UIR_FAST_PATH", "pdfplumber")
     assert _resolve_fast_path("docling") == "docling"
 
 
-def test_resolve_fast_path_env_var_used_when_arg_none(monkeypatch):
-    """When arg is None, UIR_FAST_PATH env var is honored."""
-    from uir_pipeline.pipeline import _resolve_fast_path
+def test_resolve_fast_path_env_var_used_when_arg_none(monkeypatch, caplog):
+    """When arg is None, UIR_FAST_PATH env var is honored (with alias handling).
 
-    monkeypatch.setenv("UIR_FAST_PATH", "pdfplumber")
-    assert _resolve_fast_path(None) == "pdfplumber"
+    ``UIR_FAST_PATH=pdfplumber`` is now a deprecated alias -- the resolver
+    logs a one-shot warning and returns ``"docling"``. The legal-value case
+    (``UIR_FAST_PATH=docling``) returns ``"docling"`` cleanly.
+    """
+    from uir_pipeline.pipeline import _resolve_fast_path
+    import logging as _logging
+
+    # Alias case: env=pdfplumber resolves to docling with a deprecation warning.
+    with caplog.at_level(_logging.WARNING):
+        monkeypatch.setenv("UIR_FAST_PATH", "pdfplumber")
+        assert _resolve_fast_path(None) == "docling"
+    assert any(
+        "deprecated" in r.message and "pdfplumber" in r.message
+        for r in caplog.records
+    )
+
+    # Legal-value case: env=docling returns docling cleanly.
+    caplog.clear()
     monkeypatch.setenv("UIR_FAST_PATH", "docling")
     assert _resolve_fast_path(None) == "docling"
 
@@ -319,52 +353,30 @@ def test_resolve_fast_path_unknown_env_falls_back_to_docling(monkeypatch, caplog
 # ---------------------------------------------------------------------------
 
 
-def test_orchestrator_routes_via_fast_path_arg(tmp_data_dir):
-    """Smoke: passing fast_path='pdfplumber' makes the orchestrator skip the
-    docling branch entirely (smoke-level proxy: pipeline emits a valid UIR
-    with chunks even though Docling is installed -- we're testing that
-    the cascade wiring doesn't crash on the chosen path)."""
-    from pathlib import Path
-    import shutil
-
-    src_pdf = Path("tests/fixtures/sample_pdfs/flat_text.pdf")
-    if not src_pdf.is_file():
-        pytest.skip(f"fixture missing: {src_pdf}")
-
-    pdf = tmp_data_dir / "input" / src_pdf.name
-    shutil.copy2(src_pdf, pdf)
-
-    from uir_pipeline.pipeline import run
-
-    result = run(
-        pdf,
-        output_dir=tmp_data_dir / "output",
-        skip_weaviate=True,
-        with_embeddings=False,
-        page_numbers=[1],
-        fast_path="pdfplumber",  # explicit -- test runs even if docling available
-        include_semantics=False,
+def test_resolve_fast_path_pdfplumber_alias_logs_deprecation(monkeypatch, caplog):
+    """``fast_path="pdfplumber"`` is now a deprecated alias for "docling".
+    The resolver emits a one-shot warning and returns "docling".
+    """
+    from uir_pipeline.pipeline import _resolve_fast_path
+    import logging as _logging
+    monkeypatch.delenv("UIR_FAST_PATH", raising=False)
+    with caplog.at_level(_logging.WARNING):
+        assert _resolve_fast_path("pdfplumber") == "docling"
+    assert any(
+        "deprecated" in r.message and "pdfplumber" in r.message
+        for r in caplog.records
     )
-    assert result.out_path.is_file()
-    # UMR companion always emitted (Phase 17 §UMR).
-    assert getattr(result, "umr_path", None) is not None
-    assert Path(result.umr_path).is_file()
-    # Chunks emitted on the pdfplumber branch.
-    assert result.chunk_count > 0
 
 
-def test_orchestrator_cascades_when_docling_unavailable(tmp_data_dir, monkeypatch):
-    """Smoke: when ``run(fast_path='docling')`` is called AND the docling
-    import is monkeypatched to raise :class:`DoclingUnavailable`, the
-    orchestrator logs a warning and cascades to the pdfplumber path,
-    emitting a valid UIR + UMR companion file.
-
-    Validates the orchestration glue end-to-end: docling branch raises
-    ``DoclingUnavailable`` → ``fast_path_resolved`` cascades to
-    ``"pdfplumber"`` → legacy pdfplumber + :class:`LayoutClassifier`
-    branch populates ``all_regions`` / ``table_drafts`` /
-    ``page_text_pairs`` → downstream chunk / enrich / assemble stages
-    run normally → UIR JSON + UMR written to disk.
+@pytest.mark.skipif(
+    not docling_environment_enabled(),
+    reason="alias fast_path='pdfplumber' now routes through docling",
+)
+def test_orchestrator_routes_via_fast_path_arg(tmp_data_dir):
+    """Smoke: ``fast_path='pdfplumber'`` is now a deprecated alias for the
+    docling backend -- the orchestrator emits a valid UIR with chunks via
+    docling, with a one-shot deprecation warning logged. Skipped when
+    docling isn't importable OR its model weights are unreachable.
     """
     from pathlib import Path
     import shutil
@@ -376,13 +388,51 @@ def test_orchestrator_cascades_when_docling_unavailable(tmp_data_dir, monkeypatc
     pdf = tmp_data_dir / "input" / src_pdf.name
     shutil.copy2(src_pdf, pdf)
 
-    # Force the docling branch to surface :class:`DoclingUnavailable`
-    # (simulates either: (a) missing ``docling`` dep on the runtime
-    # PATH, or (b) HF model weight download / load failure).
+    from uir_pipeline.pipeline import run
+
+    try:
+        result = run(
+            pdf,
+            output_dir=tmp_data_dir / "output",
+            skip_weaviate=True,
+            with_embeddings=False,
+            page_numbers=[1],
+            fast_path="pdfplumber",  # deprecated alias -- routed to docling with warning
+            include_semantics=False,
+        )
+    except DoclingUnavailable as exc:
+        # Routed through docling but the backend couldn't run (e.g. HF
+        # model download blocked). Skip rather than FAIL for an env issue.
+        pytest.skip(f"alias routes through docling ({exc}); skip when backend unreachable")
+    assert result.out_path.is_file()
+    # UMR companion always emitted (Phase 17 §UMR).
+    assert getattr(result, "umr_path", None) is not None
+    assert Path(result.umr_path).is_file()
+    # Chunks emitted via the docling branch (the alias routes through it).
+    assert result.chunk_count > 0
+
+
+def test_orchestrator_propagates_when_docling_unavailable(tmp_data_dir, monkeypatch):
+    """Smoke: when the docling import is monkeypatched to raise
+    :class:`DoclingUnavailable`, the orchestrator RE-RAISES (no silent
+    cascade to a legacy backend). Pre-refactor this cascaded to the
+    pdfplumber path; that cascade was removed because the pdfplumber output
+    was column-interleaved and broke double-column reading order.
+    """
+    from pathlib import Path
+    import shutil
+
+    src_pdf = Path("tests/fixtures/sample_pdfs/flat_text.pdf")
+    if not src_pdf.is_file():
+        pytest.skip(f"fixture missing: {src_pdf}")
+
+    pdf = tmp_data_dir / "input" / src_pdf.name
+    shutil.copy2(src_pdf, pdf)
+
     from uir_pipeline import docling_extract
 
     def _raise_during_import():
-        raise DoclingUnavailable("simulated-cascade-test")
+        raise DoclingUnavailable("simulated-propagate-test")
 
     monkeypatch.setattr(
         docling_extract, "_import_docling_or_raise", _raise_during_import,
@@ -390,17 +440,15 @@ def test_orchestrator_cascades_when_docling_unavailable(tmp_data_dir, monkeypatc
 
     from uir_pipeline.pipeline import run
 
-    result = run(
-        pdf,
-        output_dir=tmp_data_dir / "output",
-        skip_weaviate=True,
-        with_embeddings=False,
-        page_numbers=[1],
-        fast_path="docling",  # explicitly opt in; monkeypatch forces fallback
-        include_semantics=False,
-    )
-    # After the cascade, the legacy path emitted both files + chunks.
-    assert result.out_path.is_file()
-    assert getattr(result, "umr_path", None) is not None
-    assert Path(result.umr_path).is_file()
-    assert result.chunk_count > 0
+    with pytest.raises(DoclingUnavailable):
+        run(
+            pdf,
+            output_dir=tmp_data_dir / "output",
+            skip_weaviate=True,
+            with_embeddings=False,
+            page_numbers=[1],
+            fast_path="docling",
+            include_semantics=False,
+        )
+
+

@@ -159,7 +159,7 @@ def _sanitize_text(text: str) -> str:
     """Trim + collapse so chunk text renders cleanly inside markdown body.
 
     We never strip backticks / hashes -- that would mangle code blocks.
-    We DO trim trailing whitespace per line so a pdfplumber artifact
+    We DO trim trailing whitespace per line so a Docling artifact
     (``"\\n \\n"``) doesn't blow the markdown source into a visible blank
     line on render. Tests pin the \"trailing whitespace stripped\" rule.
     """

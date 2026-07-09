@@ -54,11 +54,12 @@ def fake_run(monkeypatch):
     """
     calls: list[dict] = []
 
-    def _fake(input_path, output_dir, *, skip_weaviate=False, dry_run=False, with_embeddings=True, on_progress=None, page_numbers=None):
+    def _fake(input_path, output_dir, *, skip_weaviate=False, dry_run=False, with_embeddings=True, on_progress=None, page_numbers=None, fast_path=None, intent=None):
         calls.append({
             "input_path": str(input_path),
             "skip_weaviate": skip_weaviate,
             "with_embeddings": with_embeddings,
+            "fast_path": fast_path,
         })
         # Walk the full stage list so progress advances.
         for stage, pct in [
@@ -80,7 +81,22 @@ def fake_run(monkeypatch):
         out_dir = Path(output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         uir_path = out_dir / "fake_doc.uir.json"
-        uir_path.write_text(json.dumps({"uiR_version": "1.0", "id": "fake_doc"}))
+        # PLAN §17 §Multi-format follow-up: include the top-level
+        # ``source`` field so the web layer's source-format/route
+        # surfacing + the front-end format-pill code path are
+        # exercised end-to-end. The real orchestrator writes
+        # ``source.format`` and ``source.route`` (see
+        # :class:`uir_pipeline.uir_schema.Source`); we mirror that
+        # here so the test contract is faithful.
+        uir_path.write_text(json.dumps({
+            "uiR_version": "1.0",
+            "id": "fake_doc",
+            "source": {
+                "format": "PDF",
+                "route": "pdf",
+                "uri": "test://fake_doc.pdf",
+            },
+        }))
         # Return a Mock-style object -- the web layer uses .uir_id, .out_path, etc.
         from types import SimpleNamespace
         return SimpleNamespace(
@@ -134,13 +150,58 @@ def test_run_rejects_missing_file(client):
     assert "file" in (resp.get_json()["error"] or "").lower()
 
 
-def test_run_rejects_non_pdf(client, tmp_path):
-    txt = tmp_path / "foo.txt"
-    txt.write_text("hello")
-    with txt.open("rb") as fh:
-        resp = client.post("/api/run", data={"file": (fh, "foo.txt")}, content_type="multipart/form-data")
+def test_run_rejects_unsupported_format(client, tmp_path):
+    """PLAN §17 §Multi-format follow-up: the upload form now accepts a
+    dozen+ formats via :data:`format_router.SUPPORTED_EXTENSIONS` --
+    we test rejection of a *truly* unsupported extension so the test
+    is a meaningful regression guard against accidentally widening
+    the allow-list further than the orchestrator can ingest.
+    """
+    bin_file = tmp_path / "foo.xyz"
+    bin_file.write_bytes(b"\x00\x01\x02\x03")
+    with bin_file.open("rb") as fh:
+        resp = client.post(
+            "/api/run",
+            data={"file": (fh, "foo.xyz")},
+            content_type="multipart/form-data",
+        )
     assert resp.status_code == 400
-    assert "pdf" in (resp.get_json()["error"] or "").lower()
+    assert "unsupported" in (resp.get_json()["error"] or "").lower()
+
+
+def test_run_accepts_text_format(client, fake_run, tmp_path):
+    """PLAN §17 §Multi-format follow-up: a ``.txt`` upload should be
+    accepted (routed through the TEXT lane) and produce a successful
+    job -- not the legacy 400 response the PDF-only code returned.
+    """
+    txt = tmp_path / "notes.txt"
+    txt.write_text("hello world\nthis is a test document for the text route.\n")
+    with txt.open("rb") as fh:
+        resp = client.post(
+            "/api/run",
+            data={"file": (fh, "notes.txt")},
+            content_type="multipart/form-data",
+        )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["job_id"]
+    # The runner should pick up the .txt extension on disk -- this is
+    # the contract the format_router relies on for the extension
+    # fallback (text / code / image files share a "no magic" signature).
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        s = client.get(f"/api/status/{body['job_id']}").get_json()
+        if s["status"] in (JOB_DONE, JOB_ERROR):
+            break
+        time.sleep(0.05)
+    assert s["status"] == JOB_DONE
+    # The runner should have been invoked with the .txt upload, with
+    # the original extension preserved on disk so the format_router
+    # extension-fallback still works. This is the multi-format
+    # contract end-to-end: accepted -> routed -> called.
+    assert any(
+        call["input_path"].endswith(".txt") for call in fake_run
+    ), f"fake_run not called with .txt; calls={fake_run!r}"
 
 
 def test_run_full_lifecycle(client, fake_run, sample_pdf):
@@ -171,6 +232,7 @@ def test_run_full_lifecycle(client, fake_run, sample_pdf):
     assert Path(fake_run[0]["input_path"]).name.endswith(".pdf")
     assert fake_run[0]["skip_weaviate"] is True  # web default
     assert fake_run[0]["with_embeddings"] is True
+    assert fake_run[0]["fast_path"] == "docling"  # web pins Docling regardless of UIR_FAST_PATH env
 
     # Download produces the produced JSON file.
     dl = client.get(f"/api/download/{job_id}")
@@ -396,6 +458,80 @@ def test_result_endpoint_returns_full_uir_doc(client, fake_run, sample_pdf):
 def test_result_endpoint_404_for_unknown_job(client):
     resp = client.get("/api/result/does-not-exist")
     assert resp.status_code == 404
+
+
+def test_status_payload_handles_missing_source(client, sample_pdf, monkeypatch):
+    """Negative test for PLAN §17: a UIR JSON without a ``source``
+    field must result in ``source_format='UNKNOWN'`` /
+    ``source_route='unknown'`` rather than a 500 or KeyError. Guards
+    the ``or 'UNKNOWN'`` / ``or 'unknown'`` fallback in ``_runner``
+    against future regressions (e.g. a refactor that switches to
+    ``source_meta['format']`` and crashes on missing keys).
+    """
+    import uir_pipeline.pipeline as pipeline_mod
+
+    def _fake_no_source(input_path, output_dir, *, skip_weaviate=False, dry_run=False, with_embeddings=True, on_progress=None, page_numbers=None, fast_path=None, intent=None):
+        from types import SimpleNamespace
+        out_dir = Path(output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        uir_path = out_dir / "fake_doc.uir.json"
+        # Deliberately omit the ``source`` field.
+        uir_path.write_text(json.dumps({"uiR_version": "1.0", "id": "fake_doc"}))
+        return SimpleNamespace(
+            uir_id="fake_doc", out_path=uir_path,
+            chunk_count=3, entity_count=2, elapsed_seconds=0.42,
+        )
+
+    monkeypatch.setattr(pipeline_mod, "run", _fake_no_source)
+
+    with sample_pdf.open("rb") as fh:
+        resp = client.post(
+            "/api/run",
+            data={"file": (fh, "sample.pdf")},
+            content_type="multipart/form-data",
+        )
+    assert resp.status_code == 200
+    job_id = resp.get_json()["job_id"]
+    deadline = time.monotonic() + 10
+    final = None
+    while time.monotonic() < deadline:
+        s = client.get(f"/api/status/{job_id}").get_json()
+        if s["status"] in (JOB_DONE, JOB_ERROR):
+            final = s
+            break
+        time.sleep(0.05)
+    assert final is not None and final["status"] == JOB_DONE
+    assert final["result"]["source_format"] == "UNKNOWN"
+    assert final["result"]["source_route"] == "unknown"
+
+
+def test_status_payload_surfaces_source_format_and_route(client, fake_run, sample_pdf):
+    """PLAN §17 §Multi-format follow-up: the runner populates
+    ``result.source_format`` + ``result.source_route`` by reading the
+    just-written UIR JSON's ``source`` field so the front-end format
+    pill can render without a second fetch. The fake_run fixture
+    writes a UIR with ``source.format='PDF'`` / ``source.route='pdf'``;
+    we assert the same fields round-trip through ``/api/status``.
+    """
+    with sample_pdf.open("rb") as fh:
+        resp = client.post(
+            "/api/run",
+            data={"file": (fh, "sample.pdf")},
+            content_type="multipart/form-data",
+        )
+    assert resp.status_code == 200
+    job_id = resp.get_json()["job_id"]
+    deadline = time.monotonic() + 10
+    final = None
+    while time.monotonic() < deadline:
+        s = client.get(f"/api/status/{job_id}").get_json()
+        if s["status"] in (JOB_DONE, JOB_ERROR):
+            final = s
+            break
+        time.sleep(0.05)
+    assert final is not None and final["status"] == JOB_DONE
+    assert final["result"]["source_format"] == "PDF"
+    assert final["result"]["source_route"] == "pdf"
 
 
 def test_result_endpoint_409_if_not_done(client, monkeypatch, sample_pdf):

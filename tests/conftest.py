@@ -13,12 +13,9 @@ from __future__ import annotations
 import os
 import shutil
 
-# Default test fast_path to pdfplumber so the pytest run never pulls
-# 2 GB of HuggingFace weights on CI. Individual tests can opt in to
-# the docling branch explicitly via ``monkeypatch.setenv("UIR_FAST_PATH",
-# "docling")`` or by passing ``fast_path="docling"`` to ``run()``
-# directly. PLAN §17 §OCR follow-up.
-os.environ.setdefault("UIR_FAST_PATH", "pdfplumber")
+# Pdfplumber fast path was removed -- tests inject a fake converter via
+# ``monkeypatch`` instead. The orchestrator's docling branch is now the
+# single backend.
 from pathlib import Path
 
 import pytest

@@ -33,7 +33,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "input", type=Path,
-        help="Input PDF file (or directory of PDFs)",
+        help=(
+            "Input file (or directory). Single file accepts any supported "
+            "format (PDF/DOCX/PPTX/XLSX/HTML/EPUB/LaTeX/IPYNB/RTF/TXT/MD/"
+            "CSV/image/code); a directory is rglobbed for "
+            "src/uir_pipeline/format_router::SUPPORTED_EXTENSIONS."
+        ),
     )
     parser.add_argument(
         "--output-data", type=Path, default=Path("data/output/"),
@@ -67,17 +72,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--fast-path",
-        choices=("docling", "pdfplumber"),
+        choices=("docling",),
         default=None,
         help=(
-            "Per-page text-extraction backend. ``docling`` (default when "
-            "``UIR_FAST_PATH`` env var is unset) routes Stages 2-5 through "
-            "IBM Docling so chunks come out pre-typed as sections / tables / "
-            "figures / math instead of flattened prose. ``pdfplumber`` routes "
-            "through pdfplumber + the heuristic LayoutClassifier (faster, no "
-            "2 GB HuggingFace weight download). When ``docling`` is selected "
-            "but unavailable (missing dep OR HF model load failure), the "
-            "orchestrator transparently cascades to ``pdfplumber``."
+            "Per-page text-extraction backend. ``docling`` is the only "
+            "backend now -- the previous pdfplumber fast path was retired "
+            "because it couldn't preserve column structure. Docling failures "
+            "propagate as :class:`DoclingUnavailable`."
         ),
     )
     parser.add_argument(
@@ -97,29 +98,73 @@ def main(argv: list[str] | None = None) -> int:
     configure(level=args.log_level, fmt=args.log_format)
     log = logging.getLogger("pipeline_cli")
 
-    # Resolve PDF inputs.
+    # Resolve inputs across all supported formats (PLAN §17 §Multi-format).
+    # Single-file mode passes through dispatch directly; directory mode
+    # rglobs the SUPPORTED_EXTENSIONS set so a heterogeneous corpus
+    # (e.g. ``data/inputs/paper.pdf`` + ``notes.md``) is handled in one
+    # invocation. Discovery summary is logged once before the loop so
+    # unknown extensions surface as ``skipping`` lines.
+    from uir_pipeline.format_router import SUPPORTED_EXTENSIONS, route as _route
     targets: list[Path] = []
     if args.input.is_file():
         targets = [args.input]
     elif args.input.is_dir():
-        targets = sorted(args.input.glob("*.pdf"))
+        seen: set[Path] = set()
+        for ext in sorted(SUPPORTED_EXTENSIONS):
+            for p in args.input.rglob(f"*{ext}"):
+                if p.is_file() and p not in seen:
+                    seen.add(p)
+                    targets.append(p)
+        targets.sort()
     else:
         log.error("input not found: %s", args.input)
         return 1
 
+    # PLAN §17 §Multi-format: discovery summary uses a Counter over the
+    # detected format / route so users can see "5 PDF, 3 DOCX, 2 unknown
+    # (skipping)" at a glance. Counts are accumulated BEFORE the
+    # dispatch loop so unknown-extension files are logged but never
+    # raised.
+    from collections import Counter
+    fmt_counts: Counter[str] = Counter()
+    route_counts: Counter[str] = Counter()
+    for t in targets:
+        fmt, route = _route(t)
+        fmt_counts[fmt or "UNKNOWN"] += 1
+        route_counts[route.value] += 1
+    if targets:
+        log.info(
+            "discovered %d files: formats=%s routes=%s",
+            len(targets),
+            dict(fmt_counts),
+            dict(route_counts),
+        )
     if not targets:
-        log.error("no PDFs found under %s", args.input)
+        log.error("no supported files found under %s", args.input)
         return 1
 
     from uir_pipeline.pipeline import run
     args.output_data.mkdir(parents=True, exist_ok=True)
 
     rc = 0
-    for pdf in targets:
-        log.info("processing %s", pdf)
+    skipped = 0
+    from uir_pipeline.format_router import FormatRoute
+    for input_path in targets:
+        # Skip early on unsupported formats (PLAN §17 §Multi-format).
+        # ``format_router`` raised ``FormatRoute.SKIP`` for anything
+        # ``route()`` couldn't classify. The Counter loop above already
+        # had visibility into the underlying format string; we re-check
+        # here at dispatch time so order doesn't matter between file and
+        # batch invocation modes.
+        _, dispatch_route = _route(input_path)
+        if dispatch_route is FormatRoute.SKIP:
+            log.warning("skipping %s: unsupported format", input_path.name)
+            skipped += 1
+            continue
+        log.info("processing %s (route=%s)", input_path, dispatch_route.value)
         try:
             result = run(
-                pdf,
+                input_path,
                 output_dir=args.output_data,
                 skip_weaviate=args.skip_weaviate,
                 dry_run=args.dry_run,
@@ -129,13 +174,15 @@ def main(argv: list[str] | None = None) -> int:
             )
             log.info(
                 "done %s: chunks=%d entities=%d elapsed=%.2fs -> %s + %s",
-                pdf.name, result.chunk_count, result.entity_count,
+                input_path.name, result.chunk_count, result.entity_count,
                 result.elapsed_seconds,
                 result.out_path, getattr(result, "umr_path", None) or "n/a",
             )
         except Exception as exc:
-            log.exception("pipeline failed for %s: %s", pdf, exc)
+            log.exception("pipeline failed for %s: %s", input_path, exc)
             rc = 1  # validation/ingest failure
+    if skipped:
+        log.warning("skipped %d unsupported files (see warnings above)", skipped)
     return rc
 
 

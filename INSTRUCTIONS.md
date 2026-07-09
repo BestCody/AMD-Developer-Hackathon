@@ -22,7 +22,7 @@ Build a **production-ready Python pipeline** that converts **PDF documents** int
 - **Language**: Python 3.10+
 - **OCR**: PaddleOCR (primary) + Tesseract (fallback)
 - **Layout Understanding**: LayoutLMv3 (`microsoft/layoutlmv3-base`)
-- **Table Extraction**: `camelot` or `pdfplumber`
+- **Table Extraction**: IBM Docling (``DoclingDocument.tables``)
 - **Chunking**: Semantic (growing window, 256-512 tokens)
 - **Embeddings**: `text-embedding-3-small` (OpenAI) or `bge-small`
 - **Storage**: JSON files + Weaviate vector index

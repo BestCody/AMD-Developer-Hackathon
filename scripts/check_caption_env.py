@@ -5,7 +5,7 @@ caption path. Prints a 1-screen report covering:
 
     -- Python version + torch backend availability
     -- uir_pipeline.device picks (device, dtype) for the active host
-    -- PIL / pdfplumber / PyMuPDF / transformers imports
+    -- PIL / PyMuPDF / transformers / docling imports
     -- Florence-2 weight download status (cache hit / miss)
     -- Optional: cold-load + forward-pass + synthetic ``caption_images``
        round-trip wall-clock
@@ -84,7 +84,7 @@ def _report_environment() -> dict[str, object]:
             env["uir_dtype"] = f"unresolved: {exc}"
     except Exception as exc:  # pragma: no cover
         env["uir_device"] = f"unresolved: {exc}"
-    for name in ("PIL", "pdfplumber", "fitz", "transformers", "accelerate"):
+    for name in ("PIL", "fitz", "transformers", "accelerate"):
         try:
             __import__(name)
             env[f"dep_{name}"] = "ok"

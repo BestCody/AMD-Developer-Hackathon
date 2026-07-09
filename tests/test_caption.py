@@ -120,7 +120,6 @@ def test_caption_images_fail_soft_on_generate_failure(monkeypatch):
 
 def test_detect_figure_regions_filters_tiny_bboxes(tmp_path):
     """detect_figure_regions should drop bboxes < min_dim_px in caption_figures_in_pdf."""
-    pytest.importorskip("pdfplumber")
     pytest.importorskip("PIL")
     pytest.importorskip("pymupdf")
     from PIL import Image
@@ -154,7 +153,6 @@ def test_detect_figure_regions_returns_shape(monkeypatch, tmp_path):
     Uses a stub :func:`render_figure_crop` so the test never depends on
     PyMuPDF actually rendering anything.
     """
-    pytest.importorskip("pdfplumber")
     pytest.importorskip("reportlab")
     import uir_pipeline.caption as caption_mod
     from reportlab.lib.pagesizes import letter

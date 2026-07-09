@@ -6,15 +6,14 @@ PLAN.md \u00a79 Phase L exit:
     -- emits a single ``UIRV1`` JSON per document
     -- serial processing is fine for MVP
 
-The orchestrator's default fast path is **IBM Docling** (PLAN §17
-§OCR follow-up): a transformer-based PDF→DoclingDocument emitter that
-returns pre-typed sections / tables / figures / math so downstream
-chunks come out structured instead of flattened prose. Pass
-``fast_path="pdfplumber"`` (or set ``UIR_FAST_PATH=pdfplumber``) to use
-the legacy pdfplumber text extraction + heuristic LayoutClassifier
-path -- faster, no 2 GB HuggingFace weight download. PDF pages that
-fail text extraction on the configured path fall back to the OCR
-layer behind ``_get_page_text`` (EasyOCR + pytesseract fallback).
+The orchestrator's text path is **IBM Docling** (PLAN OCR follow-up
+done): a transformer-based PDF->DoclingDocument emitter that returns
+pre-typed sections / tables / figures / math so downstream chunks come
+out spatially-aware and column-correct instead of flattened prose.
+DOCLING is the only backend -- the previous pdfplumber fast path was
+retired because it couldn't preserve column structure. Passing
+``UIR_FAST_PATH=pdfplumber`` or ``fast_path="pdfplumber"`` emits a
+one-shot deprecation warning and routes through docling.
 
 Weaviate upsert is optional via ``skip_weaviate=True``. When enabled, the
 orchestrator (a) ensures both ``UIRChunks_v1`` and ``UIRParentDoc_v1``
@@ -105,108 +104,37 @@ class PipelineResult:
 # Page-text extraction (fast path: pdfplumber; real OCR is a one-line swap)
 # ----------------------------------------------------------------------------
 
-def _get_page_text(pdf_path: Path, page_numbers: list[int] | None = None) -> list[tuple[int, str]]:
-    """Return a list of ``(page_number, text)`` from ``pdf_path``.
-
-    ``page_numbers`` is 1-based; ``None`` means "all pages". The text is
-    pdfplumber's per-page extract_text() output (string). Returns empty
-    strings for image-only pages (which is fine for MVP -- the orchestrator
-    treats empty pages as no-op).
-    """
-    import pdfplumber  # lazy
-    out: list[tuple[int, str]] = []
-    with pdfplumber.open(str(pdf_path)) as pdf:
-        if page_numbers is None:
-            page_numbers = list(range(1, len(pdf.pages) + 1))
-        for pn in page_numbers:
-            if not (1 <= pn <= len(pdf.pages)):
-                continue
-            page = pdf.pages[pn - 1]
-            out.append((pn, page.extract_text() or ""))
-    return out
-
-
-def _get_page_words_with_real_coords(
-    pdf_path: Path,
-    page_numbers: list[int] | None = None,
-) -> list[tuple[int, tuple, str]]:
-    """Return ``[(page_number, words_tuple, page_text), ...]`` for ``pdf_path``.
-
-    Tier 1.5 #1: replaces the previous synthetic-bbox path. Each
-    :class:`DetectedWord` carries its real pdfplumber bounding box
-    ``(x0, top, x1, bottom)`` in PDF-point coordinates so the
-    :class:`LayoutClassifier` sees real geometry and emits real
-    ``heading`` / ``footer`` / ``paragraph`` labels instead of labeling
-    every page as ``header``.
-
-    Heavy pdfplumber open is done ONCE (single-context) so this is also
-    faster than the old get_text + synthesize pattern (``pdfplumber.open``
-    was invoked twice -- once in :func:`_get_page_text`, once here
-    implicitly).
-
-    The returned tuple list preserves 1-based ordering matching the
-    orchestrator's page_numbers contract.
-    """
-    import pdfplumber  # lazy
-    from uir_pipeline.ocr import DetectedWord
-    out: list[tuple[int, tuple, str]] = []
-    if not pdf_path.is_file():
-        return out
-    with pdfplumber.open(str(pdf_path)) as pdf:
-        if page_numbers is None:
-            page_numbers = list(range(1, len(pdf.pages) + 1))
-        for pn in page_numbers:
-            if not (1 <= pn <= len(pdf.pages)):
-                continue
-            page = pdf.pages[pn - 1]
-            text = page.extract_text() or ""
-            words_list: list[DetectedWord] = []
-            # Filter rotated text via pdfplumber's ``upright`` attribute.
-            # Arxiv's sideways ``viXra`` watermark and vertical figure-axis
-            # labels both emit non-upright glyphs; without this filter they
-            # concatenate into the chunk stream as reversed garbage
-            # (e.g. ``3202 guA 2 ]LC.sc[ 7v26730.6071:viXra``) and as
-            # single-character axis ticks (Fix Plan item #1). Older
-            # pdfplumber releases omit ``upright`` entirely so we default
-            # the check to ``True`` to preserve pre-fix behaviour for
-            # those versions.
-            for w in page.extract_words(extra_attrs=["upright"]):
-                if not w.get("upright", True):
-                    continue
-                words_list.append(DetectedWord(
-                    text=str(w.get("text", "")).strip(),
-                    confidence=1.0,
-                    bbox=(int(w["x0"]), int(w["top"]), int(w["x1"]), int(w["bottom"])),
-                    page=pn,
-                ))
-            out.append((pn, tuple(words_list), text))
-    return out
-
+# _get_page_text removed -- page text now comes from DoclingResult.page_texts
 
 # ----------------------------------------------------------------------------
 # Fast-path resolution + Docling shims (PLAN §17 §OCR follow-up)
 # ----------------------------------------------------------------------------
 
 def _resolve_fast_path(fast_path: str | None) -> str:
-    """Resolve the actual fast_path backend the orchestrator should use.
+    """Resolve the active fast-path backend. Always returns ``"docling"``.
+
+    Legacy callers that pass ``UIR_FAST_PATH=pdfplumber`` or
+    ``fast_path="pdfplumber"`` are redirected to docling with a one-shot
+    deprecation warning. The previous pdfplumber fast path was a
+    column-naive text scraper; the docling layout-model backend has fully
+    replaced it (PLAN OCR follow-up done).
 
     Priority: explicit ``fast_path`` arg > ``UIR_FAST_PATH`` env var >
-    ``"docling"`` (production default). :file:`tests/conftest.py` pins
-    ``UIR_FAST_PATH=pdfplumber`` so the pytest run never pays the 2 GB
-    HuggingFace weight download -- CI smoke runs default to the cheap
-    pdfplumber path; ``fast_path="docling"`` (or the env var on a real
-    dev machine) opts into the structured extractor.
-
-    Only known values are accepted; an unknown env value logs a warning
-    and falls back to ``"docling"`` so a typo can't silently route to
-    a non-existent backend.
+    ``"docling"`` (production default). Unknown values log a warning and
+    default to docling.
     """
     raw = (
         (fast_path or os.environ.get("UIR_FAST_PATH", "") or "docling")
         .strip()
         .lower()
     )
-    if raw not in ("docling", "pdfplumber"):
+    if raw == "pdfplumber":
+        logger.warning(
+            "UIR_FAST_PATH=%r is deprecated -- routing to docling (pdfplumber fast path removed)",
+            raw,
+        )
+        return "docling"
+    if raw != "docling":
         logger.warning("unknown UIR_FAST_PATH=%r -- defaulting to docling", raw)
         return "docling"
     return raw
@@ -242,30 +170,6 @@ def _docling_to_table_draft(t: dict[str, Any]) -> Any:
     )
 
 
-def _synthesize_words_for_text(text: str, page: int) -> tuple:
-    """Fallback: synthesize one ``DetectedWord`` per whitespace token.
-
-    Used when pdfplumber's ``page.extract_words()`` returns empty for a
-    page (rare -- only on full-page image scans). Real word geometries
-    are still preferred via :func:`_get_page_words_with_real_coords`;
-    this helper only exists so a downstream caller can still construct a
-    non-empty :class:`OCRPage` on degenerate input.
-    """
-    from uir_pipeline.ocr import DetectedWord
-    words: list[DetectedWord] = []
-    if not text or not text.strip():
-        return ()
-    for tok in text.split():
-        # Synthetic full-canvas bbox -- coarse fall-back only.
-        words.append(DetectedWord(
-            text=tok,
-            confidence=1.0,
-            bbox=(0, 0, 1000, 1000),
-            page=page,
-        ))
-    return tuple(words)
-
-
 # ----------------------------------------------------------------------------
 # Public API
 # ----------------------------------------------------------------------------
@@ -281,6 +185,7 @@ def run(
     on_progress: Any | None = None,
     include_semantics: bool = False,
     fast_path: str | None = None,
+    intent: str | None = None,
 ) -> PipelineResult:
     """Drive the full pipeline on one PDF and return a :class:`PipelineResult`.
 
@@ -298,21 +203,14 @@ def run(
             the UIR JSON (entities + relationships + topics; can be 400+
             + 700+ lines on a real arXiv doc). Default: ``False`` --
             semantics is OMITTED from the JSON output so agent-facing
-            consumers receive a clean payload. Use the
-            ``--include-semantics`` CLI flag (top-level ``pipeline.py``)
-            for debugging / corpus-analysis runs where the noisy metadata
-            is useful. The companion ``.umr.md`` NEVER carries semantics
-            regardless of this flag -- UMR is the agent-facing view.
-        fast_path: Per-page text-extraction backend. ``"docling"`` (default;
-            ``UIR_FAST_PATH=docling`` env var used in CI/tests) routes
-            Stages 2-5 through IBM Docling -- chunks come out pre-typed
-            (``heading`` / ``paragraph`` / ``table`` / ``figure`` /
-            ``caption``) instead of flattened prose. ``"pdfplumber"``
-            routes through pdfplumber + the heuristic LayoutClassifier
-            (faster, no 2 GB HuggingFace weight download). When the
-            docling branch raises :class:`DoclingUnavailable` (missing
-            transform stack OR HF weights), the orchestrator logs a
-            warning and transparently cascades to ``pdfplumber``.
+            consumers receive a clean payload.
+        fast_path: Per-page text-extraction backend. ``"docling"`` is the
+            only legal value; ``"pdfplumber"`` is accepted as a
+            deprecated alias and emits a one-shot warning.
+        intent: Optional intent/query for image files. When the input is
+            an IMAGE and intent is provided, it's passed to the Fireworks
+            AI vision model instead of generating a generic description.
+            Ignored for non-image routes.
 
     Returns:
         A :class:`PipelineResult` with :attr:`PipelineResult.umr_path`
@@ -323,6 +221,32 @@ def run(
     t0 = time.monotonic()
     p = Path(input_path)
     output_dir = Path(output_dir)
+
+    # Route check: IMAGE files go through the Fireworks AI vision pipeline
+    # (separate from the PDF/DOCX/TEXT pipeline below).
+    from uir_pipeline.format_router import FormatRoute, route as _format_route
+
+    fmt, froute = _format_route(p)
+    if froute is FormatRoute.IMAGE:
+        from uir_pipeline.image_pipeline import run_image_pipeline
+
+        img_result = run_image_pipeline(
+            p,
+            output_dir=output_dir,
+            intent=intent,
+            dry_run=dry_run,
+            on_progress=on_progress,
+        )
+        # Synthesise a PipelineResult from the ImagePipelineResult so the
+        # calling CLI/web layer receives the same shape it expects.
+        return PipelineResult(
+            uir_id=img_result.uir_id,
+            out_path=img_result.out_path,
+            umr_path=img_result.umr_path,
+            chunk_count=1 if not img_result.error else 0,
+            entity_count=0,
+            elapsed_seconds=img_result.elapsed_seconds,
+        )
 
     from uir_pipeline.chunk import chunk_text
     from uir_pipeline.embed import (
@@ -337,14 +261,11 @@ def run(
     )
     from uir_pipeline.enrich import EnrichmentResult, enrich_chunks
     from uir_pipeline.ingest import DocumentInput, ingest
-    from uir_pipeline.layout import LayoutClassifier
     from uir_pipeline.logging_config import (
         attach_doc_log,
         configure,
         detach_doc_log,
     )
-    from uir_pipeline.ocr import OCRPage
-    from uir_pipeline.tables import extract_tables
     from uir_pipeline.uir_schema import (
         ChunkNode,
         Entity,
@@ -403,79 +324,47 @@ def run(
         # :class:`DoclingUnavailable` (missing dep OR HF model load
         # failure), the orchestrator cascades to pdfplumber so legacy
         # fixtures keep emitting valid UIR.
-        fast_path_resolved = _resolve_fast_path(fast_path)
+        _resolve_fast_path(fast_path)  # side-effect: deprecation warning
         all_regions: list = []
         table_drafts: list = []
         page_text_pairs: list[tuple[int, str]] = []
-        ocr_pages: list[OCRPage] = []
-        if fast_path_resolved == "docling":
-            try:
-                _progress("docling_extract", 18)
-                from uir_pipeline.docling_extract import (
-                    DoclingUnavailable,
-                    extract_with_docling,
-                )
-                from uir_pipeline.layout import LayoutLabel, LayoutRegion
-                dr = extract_with_docling(p)
-                all_regions = [
-                    LayoutRegion(
-                        label=LayoutLabel(r["label"]),
-                        text=r["text"],
-                        # Docling standard ``DocumentConverter`` output
-                        # doesn't expose a per-region logprob; surface a
-                        # ``0.9`` floor (matching the table-draft
-                        # convention below) so downstream consumers
-                        # apply their own confidence threshold rather
-                        # than treating ``1.0`` as "verified".
-                        confidence=0.9,
-                        bbox=tuple(r["bbox"]),
-                        page=int(r["page"]),
-                        reading_order=i + 1,
-                    )
-                    for i, r in enumerate(dr.regions)
-                ]
-                table_drafts = [_docling_to_table_draft(t) for t in dr.tables]
-                page_text_pairs = list(dr.page_texts)
-                _progress(
-                    "layout", 45,
-                    fast_path="docling",
-                    region_count=len(all_regions),
-                    table_count=len(table_drafts),
-                )
-                # NOTE: ``ocr_pages`` stays empty on the docling branch
-                # so the downstream ``figure_caption`` stage still runs
-                # PyMuPDF-based image rendering independently (the
-                # caption lane is orthogonal to text extraction).
-            except DoclingUnavailable as exc:
-                logger.warning(
-                    "docling fast-path unavailable (%s) -- cascading to pdfplumber",
-                    exc,
-                )
-                fast_path_resolved = "pdfplumber"
-        if fast_path_resolved == "pdfplumber":
-            _progress("extract_text", 20)
-            page_data = _get_page_words_with_real_coords(
-                p, page_numbers=page_numbers,
+        # _resolve_fast_path is always "docling" now (pdfplumber is
+        # rejected with a deprecation warning). Stage the docling call
+        # early so the same DoclingResult feeds both chunk assembly
+        # (all_regions / tables / page_texts) AND the caption stage
+        # (figures with bboxes from dr.pictures).
+        # Docling is the only backend. ``DoclingUnavailable`` propagates
+        # naturally here -- the previous try/except that re-raised was a
+        # literal no-op once the pdfplumber cascade was deleted. No
+        # silent fall-back to a column-naive path; operator sees the
+        # real cause (missing dep OR HF model load failure).
+        _progress("docling_extract", 18)
+        from uir_pipeline.docling_extract import (
+            DoclingUnavailable,
+            extract_with_docling,
+        )
+        from uir_pipeline.layout import LayoutLabel, LayoutRegion
+        dr = extract_with_docling(p)
+        docling_result = dr  # forwarded to figure-caption stage
+        all_regions = [
+            LayoutRegion(
+                label=LayoutLabel(r["label"]),
+                text=r["text"],
+                confidence=0.9,
+                bbox=tuple(r["bbox"]),
+                page=int(r["page"]),
+                reading_order=i + 1,
             )
-            page_text_pairs = [(pn, text) for pn, _w, text in page_data]
-            ocr_pages = [
-                OCRPage(page_number=pn, words=words)
-                for pn, words, _t in page_data
-            ]
-            _progress("synthesize_ocr", 30)
-            # Stage 4: heuristic layout classification
-            _progress("layout", 45)
-            layout = LayoutClassifier()
-            all_regions = []
-            for op in ocr_pages:
-                all_regions.extend(layout.classify(op, page_height_px=792))
-            # Stage 5: pdfplumber tables
-            _progress("tables", 55)
-            try:
-                table_drafts = extract_tables(p, page_numbers=page_numbers)
-            except Exception as exc:
-                logger.warning("tables extraction failed: %s", exc)
-                table_drafts = []
+            for i, r in enumerate(dr.regions)
+        ]
+        table_drafts = [_docling_to_table_draft(t) for t in dr.tables]
+        page_text_pairs = list(dr.page_texts)
+        _progress(
+            "layout", 45,
+            fast_path="docling",
+            region_count=len(all_regions),
+            table_count=len(table_drafts),
+        )
 
         # Stage 5.5 (Tier 3, per PLAN_TIER3.md): image captioning.
         # Detects figure regions via pdfplumber.Page.images, renders each
@@ -493,7 +382,12 @@ def run(
         try:
             from uir_pipeline.caption import caption_figures_in_pdf
             from uir_pipeline.utils import count_tokens as _bpe_count_tokens
-            figure_records = caption_figures_in_pdf(p, page_numbers=page_numbers)
+            # Forward the same DoclingResult so caption uses figure bboxes
+            # from dr.pictures (no pdfplumber path).
+            figure_records = caption_figures_in_pdf(
+                docling_result=docling_result,
+                page_numbers=page_numbers,
+            )
             for fig in (figure_records or []):
                 caption_records_total += 1
                 cap = (fig.get("caption") or "").strip()

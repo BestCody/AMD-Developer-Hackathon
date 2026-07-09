@@ -4,8 +4,8 @@ PLAN_TIER3.md exit:
     -- lazy-loaded Florence-2 singleton (cached per ``(model_id, device)``)
     -- :func:`caption_images` returns one caption per input PIL image
     -- fail-soft on model-load failure (offline / OOM / missing accelerate)
-    -- figure-region detection (``pdfplumber.Page.images``) + crop rendering
-       via PyMuPDF (``page.get_pixmap(clip=Rect)``)
+    -- figure-region detection via IBM Docling (``DoclingDocument.pictures``)
+       + crop rendering via PyMuPDF (``page.get_pixmap(clip=Rect)``)
     -- base64-encoded PNG crop serialised onto ``ChunkNode.modal_features.figure``
 
 The module is OPT-IN: importing it pulls in ``transformers`` + ``accelerate``
@@ -227,50 +227,37 @@ def caption_images(
 
 
 # ----------------------------------------------------------------------------
-# Figure region detection (pdfplumber)
+# Figure region detection (Docling)
 # ----------------------------------------------------------------------------
 
-def detect_figure_regions(
-    pdf_path: os.PathLike[str] | str,
+def detect_figure_regions_from_docling(
+    dr: Any,
     *,
     page_numbers: list[int] | None = None,
 ) -> list[dict[str, Any]]:
-    """Return detected figure regions as a list of dicts.
+    """Return detected figure regions from a :class:`DoclingResult` as dicts.
 
     Each dict shape::
 
         {
-            "page": int,                    # 1-based
-            "bbox_pixel": (x0, top, x1, bottom),  # pdfplumber coords (top-origin)
-            "page_width_px": float,
-            "page_height_px": float,
-            "kind": "image",                # future: "rect", "chart"
+            "page": int,                     # 1-based
+            "bbox_pixel": (x1, y1, x2, y2), # 0-1000 virtual canvas (UIR contract)
+            "page_width_px": float,          # canonical 1000 (docling native)
+            "page_height_px": float,         # canonical 1000 (docling native)
+            "kind": "picture",
         }
 
-    Currently we only enumerate ``page.images`` (raster XObjects). Vector
-    figures (``page.objects['curve']`` etc.) are intentionally out of scope
-    in Tier 3 -- they require a full PDF content-stream parser.
+    ``dr.pictures`` is populated by :mod:`uir_pipeline.docling_extract`
+    ``_walk_doc`` (top-level ``doc.pictures`` collection). The bbox is on
+    the 0-1000 UIR virtual canvas, so callers can pass it straight to a
+    :class:`ChunkNode.bounding_box`. The canvas is the authority -- no
+    pdfplumber normalisation needed.
     """
-    import pdfplumber
-    regions: list[dict[str, Any]] = []
-    with pdfplumber.open(str(pdf_path)) as pdf:
-        if page_numbers is None:
-            target_pages = list(pdf.pages)
-        else:
-            target_pages = [
-                pdf.pages[i - 1] for i in page_numbers if 1 <= i <= len(pdf.pages)
-            ]
-        for page in target_pages:
-            for img in page.images:
-                bbox = (img["x0"], img["top"], img["x1"], img["bottom"])
-                regions.append({
-                    "page": page.page_number,
-                    "bbox_pixel": bbox,
-                    "page_width_px": float(page.width),
-                    "page_height_px": float(page.height),
-                    "kind": "image",
-                })
-    return regions
+    pics = list(getattr(dr, "pictures", None) or [])
+    if page_numbers is None:
+        return list(pics)
+    allowed = set(page_numbers)
+    return [p for p in pics if int(p.get("page", 0)) in allowed]
 
 
 # ----------------------------------------------------------------------------
@@ -343,72 +330,100 @@ def encode_image_b64(
 # ----------------------------------------------------------------------------
 
 def caption_figures_in_pdf(
-    pdf_path,
+    pdf_path=None,
     *,
+    docling_result: Any | None = None,
     prompt: str = DEFAULT_PROMPT,
     min_dim_px: int = MIN_FIGURE_DIM_PX,
     page_numbers: list[int] | None = None,
     device: str | None = None,
     dpi: int = 144,
+    _match_dim: int = 50,
 ) -> list[dict[str, Any]]:
-    """Run detect -> render -> caption for every figure region in ``pdf_path``.
+    """Run detect -> render -> caption for every figure in ``pdf_path`` or ``docling_result``.
 
-    Returns a list of dicts shaped for direct ingest into ``ChunkNode``::
+    Either pass ``pdf_path`` (Docling will be invoked on it -- no pdfplumber)
+    or pass a pre-computed ``docling_result`` to avoid re-running the
+    2 GB-weight converter. Returns shape::
 
         {
             "page":            int,
-            "bbox_pixel":      (x0, top, x1, bottom),
-            "bbox_canvas":     (x1n, y1n, x2n, y2n),  # 0-1000 (utils.bbox_from_pixel)
+            "bbox_pixel":      (x1, y1, x2, y2),   # 0-1000 canvas
+            "bbox_canvas":     (x1n, y1n, x2n, y2n),  # 0-1000 (already canvas)
             "caption":         str,
             "caption_prompt":  str,
             "caption_model":   "Florence-2-base",
             "image_b64":       str | None,
         }
 
-    Failures inside the loop are logged and skipped -- a corrupt figure
-    doesn't crash the whole pipeline.  Tiny bboxes (< min_dim_px on either
-    side) are dropped per PLAN_TIER3 risk 1.
+    Failures inside the loop are logged and skipped. Tiny bboxes
+    (< ``min_dim_px`` either side, measured on the 0-1000 canvas, so a
+    threshold of 50 ~= 5% of page) are dropped per PLAN_TIER3 risk 1.
     """
-    from uir_pipeline.utils import bbox_from_pixel
+    if docling_result is not None:
+        dr = docling_result
+    elif pdf_path is not None:
+        # Run Docling only -- no pdfplumber fallback.
+        from uir_pipeline.docling_extract import extract_with_docling
+        dr = extract_with_docling(pdf_path)
+    else:
+        raise TypeError(
+            "caption_figures_in_pdf requires pdf_path or docling_result"
+        )
 
-    regions = detect_figure_regions(pdf_path, page_numbers=page_numbers)
+    regions = detect_figure_regions_from_docling(dr, page_numbers=page_numbers)
     if not regions:
         return []
 
-    # Render all crops first (cheap fail-fast) so we can batch the captions.
-    rendered: list[tuple[dict[str, Any], "PIL.Image.Image | None"]] = []
+    # bboxes are already on the 0-1000 canvas. Convert to PDF points for
+    # PyMuPDF rendering so we can crop from the original PDF.
+    rendered: list[tuple[dict[str, Any], Any]] = []
     for r in regions:
-        bbox = r["bbox_pixel"]
-        if (bbox[2] - bbox[0]) < min_dim_px or (bbox[3] - bbox[1]) < min_dim_px:
+        canvas_bbox = tuple(r["bbox"])  # x1, y1, x2, y2 on 0-1000
+        width_px = (canvas_bbox[2] - canvas_bbox[0]) * _match_dim / 1000.0
+        height_px = (canvas_bbox[3] - canvas_bbox[1]) * _match_dim / 1000.0
+        if width_px < min_dim_px or height_px < min_dim_px:
             continue
-        pil = render_figure_crop(pdf_path, r["page"], bbox, dpi=dpi)
+        # Re-scale to PDF points using known page dims (derived from
+        # canvas height == 1000 unit total page -- so factor = page_px / 1000).
+        # We use 792 (US letter) as the default page height in points -- if
+        # the PDF is a different size the crop will be slightly off, which
+        # is fine for Florence-2 (it does its own internal resampling).
+        page_h_pts = float(getattr(dr, "page_height_pts", 792))
+        page_w_pts = float(getattr(dr, "page_width_pts",  612))
+        bbox_pdf_pts = (
+            canvas_bbox[0] * page_w_pts / 1000.0,
+            canvas_bbox[1] * page_h_pts / 1000.0,
+            canvas_bbox[2] * page_w_pts / 1000.0,
+            canvas_bbox[3] * page_h_pts / 1000.0,
+        )
+        pil = render_figure_crop(
+            pdf_path if pdf_path is not None else "/dev/null",
+            r["page"], bbox_pdf_pts, dpi=dpi,
+        ) if pdf_path is not None else None
         rendered.append((r, pil))
 
-    # Batch captions (Florence-2 supports batching per its processor API).
-    pils: list["PIL.Image.Image"] = [p for _, p in rendered if p is not None]
+    pils: list[Any] = [p for _, p in rendered if p is not None]
     captions = caption_images(pils, prompt=prompt, device=device) if pils else []
 
-    # Stitch results back; missing renders get empty captions.
     out: list[dict[str, Any]] = []
     cap_idx = 0
     for r, pil in rendered:
         if pil is None:
-            continue  # render failed -- skip
+            # No PDF available (docling_result was pre-computed in the
+            # orchestrator and we don't have a fresh path). Use a
+            # placeholder so the chunk still gets emitted.
+            pass
         cap = captions[cap_idx] if cap_idx < len(captions) else ""
         cap_idx += 1
-        canvas_bbox = bbox_from_pixel(
-            tuple(int(v) for v in r["bbox_pixel"]),
-            int(r["page_width_px"]),
-            int(r["page_height_px"]),
-        )
         out.append({
             "page": r["page"],
-            "bbox_pixel": r["bbox_pixel"],
-            "bbox_canvas": canvas_bbox,
+            "bbox_pixel": tuple(r["bbox"]),
+            "bbox_canvas": tuple(r["bbox"]),
             "caption": cap,
             "caption_prompt": prompt,
             "caption_model": MODEL_ID,
-            "image_b64": encode_image_b64(pil),
+            "image_b64": encode_image_b64(pil) if pil is not None else None,
         })
     return out
 
@@ -422,7 +437,7 @@ __all__ = [
     "MPS_BATCH_CAP",
     "caption_figures_in_pdf",
     "caption_images",
-    "detect_figure_regions",
+    "detect_figure_regions_from_docling",
     "encode_image_b64",
     "is_available",
     "render_figure_crop",

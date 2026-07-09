@@ -174,7 +174,7 @@ def test_wrong_uir_version_rejected(spec_example_dict):
 
 
 def test_wrong_modal_type_rejected(spec_example_dict):
-    spec_example_dict["modal_type"] = "image"
+    spec_example_dict["modal_type"] = "video"
     with pytest.raises(ValidationError):
         UIRV1.model_validate_json(json.dumps(spec_example_dict))
 
