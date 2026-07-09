@@ -56,6 +56,31 @@ def main(argv: list[str] | None = None) -> int:
         help="Skip BGE embedding step (faster; chunks emitted without vectors).",
     )
     parser.add_argument(
+        "--include-semantics", action="store_true",
+        help=(
+            "Emit the verbose ``semantics`` block (entities + relationships + "
+            "topics) in the UIR JSON. Default: OFF. The companion ``.umr.md`` "
+            "file is always emitted regardless of this flag -- UMR is the "
+            "agent-friendly view and never carries semantics. Use this flag "
+            "only for corpus-analysis / debugging runs."
+        ),
+    )
+    parser.add_argument(
+        "--fast-path",
+        choices=("docling", "pdfplumber"),
+        default=None,
+        help=(
+            "Per-page text-extraction backend. ``docling`` (default when "
+            "``UIR_FAST_PATH`` env var is unset) routes Stages 2-5 through "
+            "IBM Docling so chunks come out pre-typed as sections / tables / "
+            "figures / math instead of flattened prose. ``pdfplumber`` routes "
+            "through pdfplumber + the heuristic LayoutClassifier (faster, no "
+            "2 GB HuggingFace weight download). When ``docling`` is selected "
+            "but unavailable (missing dep OR HF model load failure), the "
+            "orchestrator transparently cascades to ``pdfplumber``."
+        ),
+    )
+    parser.add_argument(
         "--log-level", default="INFO",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
         help="Root logger level (default: INFO).",
@@ -99,11 +124,14 @@ def main(argv: list[str] | None = None) -> int:
                 skip_weaviate=args.skip_weaviate,
                 dry_run=args.dry_run,
                 with_embeddings=not args.no_embeddings,
+                include_semantics=args.include_semantics,
+                fast_path=args.fast_path,
             )
             log.info(
-                "done %s: chunks=%d entities=%d elapsed=%.2fs -> %s",
+                "done %s: chunks=%d entities=%d elapsed=%.2fs -> %s + %s",
                 pdf.name, result.chunk_count, result.entity_count,
-                result.elapsed_seconds, result.out_path,
+                result.elapsed_seconds,
+                result.out_path, getattr(result, "umr_path", None) or "n/a",
             )
         except Exception as exc:
             log.exception("pipeline failed for %s: %s", pdf, exc)

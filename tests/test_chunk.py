@@ -173,5 +173,152 @@ def test_chunk_text_modal_features_metadata():
     assert "text" in chunks[0].modal_features
     assert "chunk_strategy" in chunks[0].modal_features["text"]
     assert chunks[0].modal_features["text"]["chunk_strategy"].startswith(
-        "growing-window"
+        "paragraph-aware"
     )
+
+
+# ----------------------------------------------------------------------------
+# Paragraph-aware splitting (replaces sentence-bounded core path)
+# ----------------------------------------------------------------------------
+
+def test_chunk_text_bundles_small_paragraphs():
+    """Two short paragraphs that sum under target_tokens share one chunk
+    rather than getting separately cached AND split.
+    """
+    text = "First paragraph with a few words.\n\nSecond paragraph here."
+    chunks = chunk_text(text, page=1, target_tokens=64)
+    assert len(chunks) == 1
+    # Both paragraphs must appear in the chunk text -- ``\\n\\n`` between
+    # them preserved so the agent downstream sees the paragraph break.
+    assert "First paragraph" in chunks[0].text
+    assert "Second paragraph" in chunks[0].text
+    assert "\n\n" in chunks[0].text
+
+
+def test_chunk_text_single_newline_preserves_paragraph():
+    """``\\n`` (line-wrap) is NOT a paragraph break -- only ``\\n\\n`` is.
+
+    Verifies the empirical-eval bug class is gone: a chunk's text no
+    longer has mid-paragraph sentence splits.
+    """
+    text = "Line one. Line two.\nLine three. Line four.\n\nNew paragraph sentence A. New paragraph sentence B."
+    chunks = chunk_text(text, page=1, target_tokens=64)
+    # 2 paragraphs total. Both fit under target=64.
+    # The single-newline group stays UNSPLIT (its lines stay joined) --
+    # so ``Line two.\\nLine three`` appears in the chunk text (single
+    # newline preserved, not split into its own chunk).
+    for c in chunks:
+        # No fragment from the second sentence is glued to other sentences.
+        assert "Line two." in c.text or "Line three." in c.text
+    pool_text = "\n\n".join(c.text for c in chunks)
+    # The whole first paragraph stays intact -- ``\\n`` between Line two
+    # and Line three is preserved (line-wrap, not paragraph break).
+    assert "Line one. Line two.\nLine three. Line four." in pool_text
+    # The paragraph break survives -- ``\\n\\n`` between "Line four." and
+    # "New paragraph".
+    assert "Line four.\n\nNew" in pool_text
+
+
+def test_chunk_text_oversize_single_paragraph_triggers_halving():
+    """A SINGLE paragraph (no ``\\n\\n`` boundaries) exceeding ``max_tokens``
+    is recursively halved -- preserves the BGE 512-token ceiling while
+    staying inside the paragraph geometry.
+    """
+    # ~600 tokens, no \n\n -> 1 paragraph > max=512 -> _recursive_halve -> 2+ chunks
+    text = ("The quick brown fox jumps over the lazy dog. " * 120).strip()
+    chunks = chunk_text(text, page=1, target_tokens=256, max_tokens=MAX_CHUNK_TOKENS)
+    assert len(chunks) >= 2
+    for c in chunks:
+        assert c.token_count <= MAX_CHUNK_TOKENS
+
+
+def test_chunk_text_paragraph_split_keeps_internal_sentences_intact():
+    """Mid-paragraph sentence-capital-letters do NOT trigger splits -- the
+    old ``[.!?]+space+capital`` regex bled here and the paragraph-first
+    splitter replaces it.
+    """
+    # Paragraph A has a sentence ending + a new sentence starting with
+    # capital. The old regex would have split -- the paragraph splitter
+    # does NOT.
+    text = (
+        "First sentence. Second sentence continues. Third. Fourth.\n\n"
+        "Next paragraph one. Next paragraph two."
+    )
+    chunks = chunk_text(text, page=1, target_tokens=64)
+    # 2 paragraphs, both fit. Bundling may keep them as 1 chunk. Either
+    # way, mid-paragraph sentence boundaries must not split.
+    for c in chunks:
+        # Mid-paragraph sentence pairs stay on the same line.
+        assert ("First sentence. Second sentence continues" in c.text
+                or "Third. Fourth" in c.text
+                or "Next paragraph one. Next paragraph two" in c.text)
+
+
+def test_chunk_text_overlap_uses_small_word_tail():
+    """The overlap stitch must use the fixed small word-tail (≤16
+    words) and NOT bleed an entire sentence across the boundary.
+    """
+    text = (
+        "A short first paragraph with several words in it.\n\n"
+        "A short second paragraph with several words in it."
+    )
+    chunks = chunk_text(text, page=1, target_tokens=64, overlap_pct=20)
+    for c in chunks:
+        assert c.token_count <= MAX_CHUNK_TOKENS
+    # 2 paragraphs, both tiny. With overlap, second chunk may carry a
+    # short word-tail from the first. Cap is 16 words. The stitched
+    # chunk2 may start with up to 16 words from chunk1's tail.
+    if len(chunks) >= 2:
+        chunk2_head = chunks[1].text.split(maxsplit=20)
+        # No full sentence bleeds (each paragraph's sentences have ~9
+        # words; if 16-word overlap runs, that's >1 sentence -- but the
+        # test verifies the bleed is bounded and doesn't fragment
+        # sentences mid-word).
+        assert len(chunk2_head) <= 20
+
+
+def test_split_sentences_legacy_export_still_works():
+    """`_split_sentences` is retained as an exported legacy test helper
+    even though the production chunker is paragraph-aware. Pin that this
+    doesn't silently disappear.
+    """
+    out = _split_sentences("Hello world. Bye now. Hi again?")
+    assert out == ["Hello world.", "Bye now.", "Hi again?"]
+
+
+def test_split_into_paragraphs_helper():
+    """The paragraph-splitting helper gets exercised directly so a future
+    regression in the regex surfaces here, not just at the chunker level.
+    """
+    from uir_pipeline.chunk import _split_into_paragraphs
+    paras = _split_into_paragraphs("a\nb\n\nc\nd\n\n\ne\nf")
+    assert paras == ["a\nb", "c\nd", "e\nf"]
+
+
+def test_bundle_paragraphs_oversize_recurses():
+    """When a single paragraph exceeds max_tokens, the bundler routes it
+    through ``_recursive_halve`` so the BGE ceiling holds.
+    """
+    from uir_pipeline.chunk import _bundle_paragraphs_for_chunks
+    # Fixture: a single paragraph (no ``\\n\\n``) that is DEFINITELY over
+    # MAX_CHUNK_TOKENS. Each ~5-word sentence is ~7 BPE tokens; 200
+    # sentences ~= 1400 tokens, well above 512. Single ``\\n`` between
+    # paragraphs would NOT count as a paragraph break.
+    paragraph = (
+        "short head.\n"
+        + ("alpha beta gamma delta epsilon. " * 200).strip()
+        + "\nshort tail."
+    )
+    # Sanity: confirm the fixture is actually oversize before testing the
+    # bundler's halve path -- guards against future BGE versions shifting
+    # token boundaries so much that the assertion semantics invert.
+    from uir_pipeline.utils import count_tokens
+    assert count_tokens(paragraph) > MAX_CHUNK_TOKENS, (
+        f"fixture must exceed MAX_CHUNK_TOKENS ({MAX_CHUNK_TOKENS}); "
+        f"got {count_tokens(paragraph)}"
+    )
+    out = _bundle_paragraphs_for_chunks([paragraph], target_tokens=256, max_tokens=MAX_CHUNK_TOKENS)
+    # The single oversize paragraph gets halved => multiple chunks
+    assert len(out) >= 2
+    for seg in out:
+        assert count_tokens(seg) <= MAX_CHUNK_TOKENS

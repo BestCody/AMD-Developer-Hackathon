@@ -141,6 +141,65 @@ def gen_dense_table() -> Path:
 
 
 # ----------------------------------------------------------------------------
+# figure_rich.pdf  (PLAN_TIER3.md step 4: figure-rich fixture so caption.py
+# tests have a deterministic source. Single page, one >= MIN_FIGURE_DIM_PX
+# raster image with caption text nearby so pdfplumber.Page.images surfaces
+# the figure region AND the layout-classifier sees the caption label.)
+# ----------------------------------------------------------------------------
+
+def gen_figure_rich() -> Path:
+    """Single-page doc with 1 colored bar-chart raster image + caption.
+
+    The synthetic bar chart (5 vertical bars, varied colors) is generated
+    with PIL, written to a temp PNG, embedded via reportlab's
+    :func:`Canvas.drawImage` so ``pdfplumber.Page.images`` surfaces it as
+    a real image (not a Path object drawing). The 220x140 px crop is
+    bigger than ``MIN_FIGURE_DIM_PX=50`` on both axes so the
+    caption-stage filter doesn't reject it.
+    """
+    from PIL import Image as _PILImage
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas as _rl_canvas
+
+    pil_path = _ROOT / "tests" / "fixtures" / "sample_pdfs" / "_figure_tmp.png"
+    pil_path.parent.mkdir(parents=True, exist_ok=True)
+    # 220x140 = well over MIN_FIGURE_DIM_PX; the image carries 5 distinct
+    # colored bars so a caption model sees solid visual signal (Florence-2
+    # hallucinations are worst on near-empty regions -- PLAN_TIER3 risk 1).
+    bar_w = 30
+    bars_x = [10, 50, 90, 130, 170]
+    bar_colors = [
+        (220, 30, 30), (230, 130, 30), (220, 200, 30),
+        (30, 180, 30), (30, 60, 200),
+    ]
+    img = _PILImage.new("RGB", (220, 140), (255, 255, 255))
+    from PIL import ImageDraw
+    _draw = ImageDraw.Draw(img)
+    for x, color in zip(bars_x, bar_colors):
+        _draw.rectangle([x, 20, x + bar_w, 130], fill=color)
+    _draw.text((10, 5), "Q1 Q2 Q3 Q4 Q5", fill=(40, 40, 40))
+    img.save(pil_path)
+
+    pdf = _out_path("figure_rich.pdf")
+    c = _rl_canvas.Canvas(str(pdf), pagesize=letter)
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(72, 740, "Quarterly Revenue Visualization")
+    c.setFont("Helvetica", 11)
+    c.drawString(72, 720, "Figure 1: Quarterly revenue by region (colored bars).")
+    # Place the image so pdfplumber.Page.images surfaces a region >= 50 px.
+    c.drawImage(str(pil_path), 72, 540, 220, 140)
+    c.showPage()
+    c.save()
+    # Best-effort cleanup of the temp PNG; if cleanup fails (e.g. on
+    # Windows with file locks) the next run overwrites it anyway.
+    try:
+        pil_path.unlink()
+    except OSError:
+        pass
+    return pdf
+
+
+# ----------------------------------------------------------------------------
 # multi_column.pdf
 # ----------------------------------------------------------------------------
 
@@ -218,6 +277,7 @@ def main() -> int:
         "flat_text": gen_flat_text,
         "dense_table": gen_dense_table,
         "multi_column": gen_multi_column,
+        "figure_rich": gen_figure_rich,
     }
     if len(sys.argv) > 1:
         # Subset selection: ``python scripts/generate_fixtures.py flat_text``

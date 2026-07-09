@@ -76,6 +76,13 @@ class Job:
     intent: str | None = None
     intent_uir_path: Path | None = None
     intent_summary: dict[str, Any] | None = None
+    # Phase 17: companion UMR Markdown paths. Always populated after a
+    # successful run. ``umr_path`` is the full-document view;
+    # ``intent_umr_path`` is the intent-filtered subset when an intent
+    # was submitted. The web UI's `/api/umr/<job_id>` endpoint serves
+    # whichever of these two the user-facing view should display.
+    umr_path: Path | None = None
+    intent_umr_path: Path | None = None
 
     def to_public(self) -> dict[str, Any]:
         """Shape we return to the front-end (excludes raw filesystem paths).
@@ -203,6 +210,17 @@ def create_app(
             _advance(job, JOB_RUNNING, "done", 100, lock=jobs_lock)
             with jobs_lock:
                 job.uir_path = Path(result.out_path)
+                # Companion UMR markdown is the agent-friendly view the
+                # web UI surfaces by default (Phase 17). Population is
+                # best-effort when dry_run=True (path only, no file).
+                try:
+                    job.umr_path = Path(result.umr_path)
+                except AttributeError:
+                    # older PipelineResult test stub without umr_path --
+                    # derive from out_path sibling so the UI doesn't break.
+                    job.umr_path = job.uir_path.with_suffix(".umr.md") \
+                        if job.uir_path.suffix == ".json" \
+                        else Path(str(job.uir_path) + ".umr.md")
                 # Build the public dict by hand rather than ``dataclasses.asdict``
                 # so we stay robust if :func:`pipeline.run` ever returns a
                 # non-dataclass object (e.g. a stub in tests).
@@ -228,6 +246,37 @@ def create_app(
                         )
                         job.intent_uir_path = Path(summary["out_path"])
                         job.intent_summary = summary
+                        # Build the intent-filtered UMR companion file so
+                        # the web UI can render the narrowed markdown
+                        # view alongside the narrowed JSON view. Falls
+                        # back to the full UMR if the build fails so the
+                        # front-end never breaks on this post-process.
+                        try:
+                            from uir_pipeline.umr import build_umr as _build_umr
+                            intent_umr_path = job.intent_uir_path.with_suffix(
+                                ".md"
+                            ) if job.intent_uir_path.suffix == ".json" \
+                                else Path(str(job.intent_uir_path) + ".umr.md")
+                            # Use ``intent_filter``-aware form so the
+                            # rendered markdown reflects the matched
+                            # subset rather than the full document.
+                            intent_filter_arg = {
+                                "intent": summary.get("intent"),
+                                "keywords": summary.get("keywords", []),
+                                "matches": summary.get("matches", []),
+                            }
+                            intent_umr_path.write_text(
+                                _build_umr(
+                                    json.loads(job.intent_uir_path.read_text()),
+                                    intent_filter=intent_filter_arg,
+                                )
+                            )
+                            job.intent_umr_path = intent_umr_path
+                        except Exception as exc:  # noqa: BLE001 -- best-effort
+                            logger.warning(
+                                "intent-umr build failed for job %s: %s",
+                                job.job_id, exc,
+                            )
                         # Augment result so the UI can show
                         # ``"X of Y chunks (intent: ...)"`` from a single poll.
                         job.result["intent_matched_chunks"] = int(
@@ -340,6 +389,48 @@ def create_app(
             mimetype="application/json",
             as_attachment=False,
             download_name=path.name,
+        )
+
+    @app.get("/api/umr/<job_id>")
+    def api_umr(job_id: str) -> Response:
+        """Serve the UMR Markdown companion file (Phase 17).
+
+        When the user submitted an ``intent`` field, the narrowed
+        filtered markdown (``intent_umr_path``) is served so the
+        front-end shows only the matched sections/chunks. Otherwise the
+        full-document UMR is streamed.
+
+        ``/api/umr/<job_id>`` is the agent-facing view that the web UI
+        displays by default -- replaces the verbose UIR JSON ``<pre>``
+        that used to bloat the response with entities/relationships.
+        The downloadable UIR JSON still lives at ``/api/download/<job_id>``
+        for power users / corpus debugging.
+        """
+        with jobs_lock:
+            job = jobs.get(job_id)
+            if job is None:
+                abort(404, description="job not found")
+            if job.status != JOB_DONE or job.umr_path is None:
+                abort(409, description=f"job not done (status={job.status})")
+            # Prefer the intent-filtered UMR when intent was supplied;
+            # else the full-document UMR. Both are markdown with the
+            # same mime type / same front-end renderer.
+            candidate = job.intent_umr_path or job.umr_path
+            if not candidate.is_file():
+                # Fall through to a synthetic placeholder so a partial
+                # crash in the umr builder doesn't 404 the front-end.
+                return Response(
+                    (
+                        "# UMR not yet generated\n\n"
+                        "_Pipeline run completed but the UMR file is missing._"
+                    ),
+                    mimetype="text/markdown",
+                )
+        return send_file(
+            candidate,
+            mimetype="text/markdown",
+            as_attachment=False,
+            download_name=candidate.name,
         )
 
     @app.errorhandler(400)

@@ -56,13 +56,18 @@
 
     <section id="result-section" class="result hidden">
       <div class="result__bar">
-        <h2>UIR v1.0 <span class="muted" id="result-summary"></span></h2>
+        <h2 id="result-title">UIR v1.0 <span class="muted" id="result-summary"></span></h2>
         <div class="result__actions">
-          <button id="copy-btn" type="button">Copy JSON</button>
+          <div class="toggle-group" role="tablist" aria-label="Result view">
+            <button id="view-umr-btn" type="button" class="active" role="tab" aria-selected="true">UMR</button>
+            <button id="view-json-btn" type="button" role="tab" aria-selected="false">UIR JSON</button>
+          </div>
+          <button id="copy-btn" type="button">Copy</button>
           <a id="download-link" class="btn" href="#" download>Download</a>
         </div>
       </div>
-      <pre id="json-output" class="json"></pre>
+      <pre id="umr-output" class="umr-source" role="tabpanel" aria-label="Universal Markdown Representation"></pre>
+      <pre id="json-output" class="json hidden" role="tabpanel" aria-label="UIR JSON document"></pre>
     </section>
 
     <section id="error-section" class="error hidden">

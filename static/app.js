@@ -16,10 +16,14 @@
   const jobIdEl = $("#job-id");
   const elapsedEl = $("#elapsed");
   const resultSection = $("#result-section");
+  const resultTitle = $("#result-title");
   const resultSummary = $("#result-summary");
+  const umrOutput = $("#umr-output");
   const jsonOutput = $("#json-output");
   const copyBtn = $("#copy-btn");
   const downloadLink = $("#download-link");
+  const viewUmrBtn = $("#view-umr-btn");
+  const viewJsonBtn = $("#view-json-btn");
   const errorSection = $("#error-section");
   const errorOutput = $("#error-output");
 
@@ -28,6 +32,11 @@
   // Most-recent /api/status payload -- used by renderResult to surface
   // the intent-filter summary alongside the UIR preview.
   let lastStatus = null;
+  // Most-recent UIR-doc fetch (cached for the JSON-tab swap). UMR is
+  // already cached as ``umrOutput.textContent`` so a tab switch doesn't
+  // re-fetch. Both cached locally because flipping tabs on a slow
+  // network would otherwise feel sluggish.
+  let lastUirDoc = null;
 
   function setStatus({ stage, percent }) {
     stageText.textContent = stage || "—";
@@ -42,6 +51,7 @@
     hide("status-section");
     hide("result-section");
     hide("error-section");
+    umrOutput.textContent = "";
     jsonOutput.textContent = "";
     errorOutput.textContent = "";
     progressFill.style.width = "0%";
@@ -49,6 +59,8 @@
     pctText.textContent = "0%";
     jobIdEl.textContent = "—";
     elapsedEl.textContent = "0.0s";
+    lastUirDoc = null;
+    setActiveView("umr");
     // Keep the intent text across ``Run again`` clicks so the user can
     // hit replay on a slightly different PDF without re-typing.
     if (pollHandle) { clearInterval(pollHandle); pollHandle = null; }
@@ -56,6 +68,27 @@
     runBtn.disabled = false;
     runBtn.textContent = "Run pipeline";
   }
+
+  function setActiveView(which) {
+    // which === "umr" | "json"
+    const showUmr = which !== "json";
+    umrOutput.classList.toggle("hidden", !showUmr);
+    jsonOutput.classList.toggle("hidden", showUmr);
+    viewUmrBtn.classList.toggle("active", showUmr);
+    viewJsonBtn.classList.toggle("active", !showUmr);
+    viewUmrBtn.setAttribute("aria-selected", String(showUmr));
+    viewJsonBtn.setAttribute("aria-selected", String(!showUmr));
+    copyBtn.textContent = showUmr ? "Copy UMR" : "Copy JSON";
+  }
+
+  viewUmrBtn?.addEventListener("click", () => setActiveView("umr"));
+  viewJsonBtn?.addEventListener("click", () => {
+    // On-demand fetch so a slow /api/result only pays when the user
+    // explicitly requests the verbose JSON view.
+    if (!currentJobId) return;
+    if (!lastUirDoc) fetchAndFillJson();
+    setActiveView("json");
+  });
 
   function setFile(file) {
     if (!file) { runBtn.disabled = true; fileLabel.textContent = "Click to choose a PDF"; return; }
@@ -154,38 +187,87 @@
 
   async function renderResult(meta) {
     if (!currentJobId) return;
-    // Fetch the (possibly intent-filtered) UIR document for in-browser
-    // rendering. Falls back to metadata-only if the fetch fails.
+    // Fetch the UMR companion file (Phase 17 -- agent-facing view) and
+    // also the UIR JSON so the user can flip tabs on demand. UMR is
+    // primary; JSON is opt-in for debugging.
+    let umrText = "";
     let uirDoc = null;
+    try {
+      const r = await fetch(`/api/umr/${currentJobId}`);
+      if (r.ok) umrText = await r.text();
+    } catch (e) { /* swallow; we'll render metadata below */ }
     try {
       const r = await fetch(`/api/result/${currentJobId}`);
       if (r.ok) uirDoc = await r.json();
-    } catch (e) { /* swallow; we'll render metadata below */ }
+    } catch (e) { /* swallow; JSON view will be empty until tab click */ }
+    lastUirDoc = uirDoc;
     const intentSummary = lastStatus && lastStatus.intent;
 
-    if (uirDoc) {
-      const id = uirDoc.id || (meta && meta.uir_id) || "unknown";
-      const title = (uirDoc.metadata && uirDoc.metadata.title) || "";
-      const nChunks = (uirDoc.structure && uirDoc.structure.root && uirDoc.structure.root.children)
-        ? uirDoc.structure.root.children.length
-        : (meta && meta.chunk_count) ?? "?";
-      const nEntities = (uirDoc.semantics && uirDoc.semantics.entities)
-        ? uirDoc.semantics.entities.length
-        : (meta && meta.entity_count) ?? "?";
+    if (umrText) {
+      umrOutput.textContent = umrText;
+      // Also set the JSON output if we have it, so the JSON tab works without refetch
+      if (uirDoc) {
+        jsonOutput.textContent = JSON.stringify(uirDoc, null, 2);
+      }
+      // The summary line still uses UIR metadata for accurate counts
+      // (chunk_count is the source of truth, not the UMR content).
+      const id = (uirDoc && uirDoc.id) || (meta && meta.uir_id) || "unknown";
+      const title = (uirDoc && uirDoc.metadata && uirDoc.metadata.title) || "";
+      const nChunks = (meta && meta.chunk_count) ??
+        ((uirDoc && uirDoc.structure && uirDoc.structure.root &&
+          uirDoc.structure.root.children)
+            ? uirDoc.structure.root.children.length : "?");
       const titleBit = title ? ` · ${title}` : "";
-      const baseSummary = `${id}${titleBit} · ${nChunks} chunks · ${nEntities} entities`;
+      const baseSummary = `${id}${titleBit} · ${nChunks} chunks`;
       resultSummary.textContent = renderIntentSummary(baseSummary, intentSummary);
-      jsonOutput.textContent = JSON.stringify(uirDoc, null, 2);
+      resultTitle.firstChild.nodeValue = "UMR ";
+      // Set download link to the UIR file (consistent with the /api/download endpoint)
       downloadLink.download = `${id}.uir.json`;
     } else {
-      if (!meta) return showError("Pipeline returned no result.");
-      const baseSummary = `${meta.chunk_count} chunks \u00b7 ${meta.entity_count} entities \u00b7 ${meta.elapsed_seconds}s`;
-      resultSummary.textContent = " " + baseSummary;
-      jsonOutput.textContent = JSON.stringify(meta, null, 2);
-      downloadLink.download = (meta.uir_id || currentJobId) + ".uir.json";
+      // Back-compat: UMR endpoint missing \u2014 fall through to JSON-only
+      // rendering so the UI never breaks when the WSGI server is older.
+      if (uirDoc) {
+        const id = uirDoc.id || (meta && meta.uir_id) || "unknown";
+        const title = (uirDoc.metadata && uirDoc.metadata.title) || "";
+        const nChunks = (uirDoc.structure && uirDoc.structure.root &&
+                          uirDoc.structure.root.children)
+          ? uirDoc.structure.root.children.length
+          : (meta && meta.chunk_count) ?? "?";
+        const nEntities = (uirDoc.semantics && uirDoc.semantics.entities)
+          ? uirDoc.semantics.entities.length
+          : (meta && meta.entity_count) ?? "?";
+        const titleBit = title ? ` \u00b7 ${title}` : "";
+        const baseSummary = `${id}${titleBit} \u00b7 ${nChunks} chunks \u00b7 ${nEntities} entities`;
+        resultSummary.textContent = renderIntentSummary(baseSummary, intentSummary);
+        jsonOutput.textContent = JSON.stringify(uirDoc, null, 2);
+        downloadLink.download = `${id}.uir.json`;
+      } else if (meta) {
+        const baseSummary = `${meta.chunk_count} chunks \u00b7 ${meta.entity_count} entities \u00b7 ${meta.elapsed_seconds}s`;
+        resultSummary.textContent = " " + baseSummary;
+        jsonOutput.textContent = JSON.stringify(meta, null, 2);
+        downloadLink.download = (meta.uir_id || currentJobId) + ".uir.json";
+      } else {
+        return showError("Pipeline returned no result.");
+      }
     }
     show("result-section");
+    setActiveView("umr");  // default: UMR markdown
     downloadLink.href = `/api/download/${currentJobId}`;
+  }
+
+  async function fetchAndFillJson() {
+    if (!currentJobId) return;
+    try {
+      const r = await fetch(`/api/result/${currentJobId}`);
+      if (r.ok) {
+        lastUirDoc = await r.json();
+        jsonOutput.textContent = JSON.stringify(lastUirDoc, null, 2);
+      } else {
+        jsonOutput.textContent = `HTTP ${r.status}: ${await r.text()}`;
+      }
+    } catch (e) {
+      jsonOutput.textContent = `Network error: ${e.message}`;
+    }
   }
 
   function showError(msg) {
@@ -194,13 +276,20 @@
   }
 
   copyBtn.addEventListener("click", async () => {
+    let target;
+    if (viewUmrBtn.classList.contains("active")) {
+      target = umrOutput;
+    } else {
+      target = jsonOutput;
+    }
+    const label = target === umrOutput ? "Copy UMR" : "Copy JSON";
     try {
-      await navigator.clipboard.writeText(jsonOutput.textContent);
+      await navigator.clipboard.writeText(target.textContent);
       copyBtn.textContent = "Copied!";
-      setTimeout(() => (copyBtn.textContent = "Copy JSON"), 1200);
+      setTimeout(() => (copyBtn.textContent = label), 1200);
     } catch {
       copyBtn.textContent = "Copy failed";
-      setTimeout(() => (copyBtn.textContent = "Copy JSON"), 1200);
+      setTimeout(() => (copyBtn.textContent = label), 1200);
     }
   });
 })();

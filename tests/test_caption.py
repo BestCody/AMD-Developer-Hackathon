@@ -15,92 +15,21 @@ import pytest
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+#
+# Florence-2 processor/model stubs + a Pillow synthetic-image helper live
+# in :mod:`tests.stubs` (promoted out of this file -- cross-test-directory
+# imports of test-private classes were a code smell that broke the
+# ``tests/integration/test_pipeline_tier3.py`` review). The stubs keep the
+# exact contracts the production code in :mod:`uir_pipeline.caption`
+# consumes; anything that does ``tensor.shape`` / ``.tolist()`` /
+# tensorial arithmetic will FAIL loudly under stub mode (by design).
 
-class _StubProcessor:
-    """Mimics transformers.AutoProcessor just enough for the round-trip test."""
-
-    def __init__(self, canned: str | list[str]):
-        self._canned = canned if isinstance(canned, list) else [canned]
-
-    def __call__(self, *, text, images, return_tensors, padding=True):  # noqa: D401
-        # The stub never calls .to() on real tensors, but ``inputs.to(...)``
-        # is reasonable to support.  Implement it as a no-op dict.
-        return _StubInputs(text=text, images=images)
-
-    def batch_decode(self, ids, skip_special_tokens=False):  # noqa: D401
-        n = len(self._canned)
-        return [self._canned[i % n] for i in range(len(ids) if hasattr(ids, "__len__") else 1)]
-
-    def post_process_generation(self, text, *, task, image_size):  # noqa: D401
-        return {task: text}
-
-
-class _StubModel:
-    def __init__(self, canned):
-        self._canned = canned
-        self.device = "cpu"
-        self.dtype = None
-
-    def generate(self, *, input_ids, pixel_values, max_new_tokens, num_beams):  # noqa: D401
-        # Return a sentinel shape; the stub processor reads from ``self._canned``.
-        return [None] * (len(pixel_values) if hasattr(pixel_values, "__len__") else 1)
-
-
-class _StubInputs:
-    """Fakes the HF tokenized-output dict; supports ``.to(...)`` + dict subscripting.
-
-    The real Florence-2 processor returns an object that supports both
-    attribute access (``inputs.input_ids``) AND key access
-    (``inputs['input_ids']``). Our stub wires up the latter so that
-    :func:`caption_images`'s ``inputs["input_ids"]`` /
-    ``inputs["pixel_values"]`` lookups succeed.
-
-    Stub values are plain lists (not torch tensors) shaped ``len(images)``.
-    Real Florence-2 wraps them as ``torch.long`` (input_ids) and
-    ``torch.float32`` (pixel_values); the stub is good enough for the
-    single ``generate()`` call the production code makes, but anything
-    that does ``tensor.shape`` / ``tensor.dtype`` / ``.tolist()`` would
-    fail loudly in stub mode (intentional -- so a future test that
-    reaches into tensor shape is forced to either mock the tensor or
-    skip).
-    """
-
-    # Required keys per Florence-2's processor output dict.
-    _KEYS: tuple[str, ...] = ("input_ids", "pixel_values", "attention_mask")
-
-    def __init__(self, text, images):
-        self.text = text
-        self.images = images
-        n = len(images)
-        # Per-key lists of length n; values are placeholders that any
-        # downstream ``len(...)`` iteration accepts.
-        self._lookup: dict[str, list] = {
-            "input_ids": [0] * n,
-            "pixel_values": list(images),
-            "attention_mask": [1] * n,
-        }
-        # Sanity-check invariant: every key has len == len(images).
-        # Real Florence-2 broadcasts the batch dimension across all keys.
-        for k, v in self._lookup.items():
-            assert len(v) == n, f"_StubInputs[{k!r}] not batch-broadcast (len={len(v)} != {n})"
-
-    def __getitem__(self, key: str) -> list:  # noqa: D401
-        return self._lookup[key]
-
-    def to(self, *args, **kwargs):  # noqa: D401
-        # Real Florence-2 moves ``input_ids``/``pixel_values`` to the
-        # target device and casts to ``dtype``. Stub-mode tests don't
-        # care -- the parent (Fake) model never reads from the values.
-        return self
-
-
-def _make_pil_stub(w: int = 32, h: int = 32) -> "PIL.Image.Image":
-    """Build a tiny synthetic PIL Image (no PyMuPDF / Florence weights needed)."""
-    try:
-        from PIL import Image
-    except ImportError:  # pragma: no cover
-        pytest.skip("Pillow is required for test_caption.py")
-    return Image.new("RGB", (w, h), (127, 127, 127))
+from tests.stubs import (  # noqa: F401  -- _install_stub references _StubProcessor/_StubModel; _StubInputs/_make_pil_stub are re-exported for downstream tests that import from tests.test_caption directly
+    _StubInputs,
+    _StubModel,
+    _StubProcessor,
+    _make_pil_stub,
+)
 
 
 def _install_stub(monkeypatch, canned: str | list[str]):

@@ -59,3 +59,15 @@ pytest>=8.0
 pytest-mock>=3.11
 mypy>=1.7
 ruff>=0.1
+
+# --- Phase 18 PDF→Markdown fast-path (PLAN §17 §OCR follow-up) ---
+# Docling (IBM, MIT): transformer-based PDF→DoclingDocument emitter that
+# produces pre-typed sections / tables / figures / math. The orchestrator
+# ``run()`` cascades to pdfplumber transparently if this dep is missing
+# OR the model weights fail to load, so installing / uninstalling this
+# row should never break the pipeline. Pinned to the 2.x line because
+# 2.111.0 is the version that was smoke-tested; the 3.x line introduces
+# a major schema refactor for ``DoclingDocument``. CI tests pin the
+# fast path to pdfplumber via ``UIR_FAST_PATH=pdfplumber`` in
+# ``tests/conftest.py`` so this dep is not exercised on every pytest run.
+docling>=2.111,<3

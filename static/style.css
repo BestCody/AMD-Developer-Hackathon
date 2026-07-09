@@ -189,6 +189,56 @@ section { margin-top: 22px; }
 }
 .json--err { border-color: rgba(239, 68, 68, 0.35); }
 
+/* UMR (Universal Markdown Representation) -- agent-facing view. Same
+   monospace base as .json so markdown source renders predictably, but
+   with subtly tighter line-height + a small left accent stripe so the
+   user can distinguish markdown vs JSON at a glance. */
+.umr-source {
+  background: var(--code-bg);
+  border-radius: 10px;
+  padding: 14px 16px 14px 18px;
+  font-family: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  max-height: 480px;
+  overflow: auto;
+  margin: 10px 0 0;
+  white-space: pre;
+  word-break: normal;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-left: 3px solid var(--accent);
+}
+
+/* View-tab toggle group: UMR / UIR JSON. The .active variant keeps the
+   bottom-border highlight + slightly elevated background so the chosen
+   tab is unmistakable without a separate accent border on every state. */
+.toggle-group {
+  display: inline-flex;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  padding: 2px;
+  gap: 2px;
+}
+.toggle-group button {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 13px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.toggle-group button:hover { color: var(--text); }
+.toggle-group button.active {
+  background: rgba(110, 168, 255, 0.18);
+  color: var(--text-strong);
+  border-color: rgba(110, 168, 255, 0.30);
+}
+
 .error h2 { color: var(--err); margin: 0 0 6px; font-size: 18px; }
 
 footer { margin-top: 26px; text-align: center; }

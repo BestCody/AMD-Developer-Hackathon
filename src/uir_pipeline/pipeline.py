@@ -6,11 +6,15 @@ PLAN.md \u00a79 Phase L exit:
     -- emits a single ``UIRV1`` JSON per document
     -- serial processing is fine for MVP
 
-The orchestrator's fast path uses **pdfplumber text extraction** as a
-stand-in for the per-page OCR step. This keeps the MVP smoke test fast
-(<30s on a single PDF) without forcing a 100MB+ EasyOCR model download
-on the test machine. Real-OCR is a one-line swap behind the
-``_get_page_text`` indirection.
+The orchestrator's default fast path is **IBM Docling** (PLAN §17
+§OCR follow-up): a transformer-based PDF→DoclingDocument emitter that
+returns pre-typed sections / tables / figures / math so downstream
+chunks come out structured instead of flattened prose. Pass
+``fast_path="pdfplumber"`` (or set ``UIR_FAST_PATH=pdfplumber``) to use
+the legacy pdfplumber text extraction + heuristic LayoutClassifier
+path -- faster, no 2 GB HuggingFace weight download. PDF pages that
+fail text extraction on the configured path fall back to the OCR
+layer behind ``_get_page_text`` (EasyOCR + pytesseract fallback).
 
 Weaviate upsert is optional via ``skip_weaviate=True``. When enabled, the
 orchestrator (a) ensures both ``UIRChunks_v1`` and ``UIRParentDoc_v1``
@@ -20,6 +24,7 @@ aggregate to the parent collection.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -77,12 +82,23 @@ def _is_boilerplate(text: str) -> bool:
 
 @dataclass(frozen=True)
 class PipelineResult:
-    """Per-document pipeline outcome."""
+    """Per-document pipeline outcome.
+
+    ``umr_path`` is the Universal Markdown Representation companion
+    file ``{uir_id}.umr.md`` emitted alongside ``{uir_id}.uir.json``.
+    Always populated (Phase 17 §UMR); the agent-facing view of the
+    document. ``entity_count`` reflects the post-boilerplate-filter
+    entity count when ``include_semantics`` is True (default False),
+    else 0 to surface the empty semantics block honestly. The new
+    fields are defaulted so test stubs / older callers that don't
+    kwarg-pass them keep working.
+    """
     uir_id: str
     out_path: Path
-    chunk_count: int
-    entity_count: int
-    elapsed_seconds: float
+    umr_path: Path | None = None
+    chunk_count: int = 0
+    entity_count: int = 0
+    elapsed_seconds: float = 0.0
 
 
 # ----------------------------------------------------------------------------
@@ -167,6 +183,65 @@ def _get_page_words_with_real_coords(
     return out
 
 
+# ----------------------------------------------------------------------------
+# Fast-path resolution + Docling shims (PLAN §17 §OCR follow-up)
+# ----------------------------------------------------------------------------
+
+def _resolve_fast_path(fast_path: str | None) -> str:
+    """Resolve the actual fast_path backend the orchestrator should use.
+
+    Priority: explicit ``fast_path`` arg > ``UIR_FAST_PATH`` env var >
+    ``"docling"`` (production default). :file:`tests/conftest.py` pins
+    ``UIR_FAST_PATH=pdfplumber`` so the pytest run never pays the 2 GB
+    HuggingFace weight download -- CI smoke runs default to the cheap
+    pdfplumber path; ``fast_path="docling"`` (or the env var on a real
+    dev machine) opts into the structured extractor.
+
+    Only known values are accepted; an unknown env value logs a warning
+    and falls back to ``"docling"`` so a typo can't silently route to
+    a non-existent backend.
+    """
+    raw = (
+        (fast_path or os.environ.get("UIR_FAST_PATH", "") or "docling")
+        .strip()
+        .lower()
+    )
+    if raw not in ("docling", "pdfplumber"):
+        logger.warning("unknown UIR_FAST_PATH=%r -- defaulting to docling", raw)
+        return "docling"
+    return raw
+
+
+def _docling_to_table_draft(t: dict[str, Any]) -> Any:
+    """Synthesize a :class:`TableDraft` from a docling tables[].dict.
+
+    Docling natively exports tables as GitHub-flavored markdown with
+    a ``|``-separated header row preserved. :attr:`TableDraft.row_count`
+    and :attr:`TableDraft.col_count` are derived from the rendered
+    markdown: pipes_count-1 on the first non-separator row for cols;
+    count of non-separator ``|``-led lines for rows. The
+    :attr:`TableDraft.confidence` field is a static ``0.9`` because the
+    standard ``DocumentConverter`` output doesn't expose a per-region
+    logprob -- downstream consumers can apply their own threshold.
+    """
+    from uir_pipeline.tables import TableDraft
+    md = t["markdown"]
+    rows = [
+        r for r in md.splitlines()
+        if r.strip().startswith("|") and "---" not in r
+    ]
+    col_count = max(0, rows[0].count("|") - 1) if rows else 0
+    row_count = len(rows)
+    return TableDraft(
+        page_number=int(t["page"]),
+        bbox=tuple(t["bbox"]),
+        markdown=md,
+        row_count=row_count,
+        col_count=col_count,
+        confidence=0.9,
+    )
+
+
 def _synthesize_words_for_text(text: str, page: int) -> tuple:
     """Fallback: synthesize one ``DetectedWord`` per whitespace token.
 
@@ -204,22 +279,46 @@ def run(
     with_embeddings: bool = True,
     page_numbers: list[int] | None = None,
     on_progress: Any | None = None,
+    include_semantics: bool = False,
+    fast_path: str | None = None,
 ) -> PipelineResult:
     """Drive the full pipeline on one PDF and return a :class:`PipelineResult`.
 
     Parameters:
         input_path: PDF file path.
-        output_dir: Where to write ``{uir_id}.uir.json``.
+        output_dir: Where to write ``{uir_id}.uir.json`` (and the companion
+            ``{uir_id}.umr.md`` -- always emitted alongside).
         skip_weaviate: True -> don't upsert to Weaviate (default: false).
         dry_run: True -> don't write JSON or Weaviate (default: false).
         with_embeddings: True -> compute BGE embeddings (default: true).
             False -> skip the embed step (faster, useful for tests).
         page_numbers: 1-based list of pages to process (``None`` = all).
         on_progress: optional callback ``fn(stage: str, percent: int)``.
+        include_semantics: True -> emit the verbose ``semantics`` block in
+            the UIR JSON (entities + relationships + topics; can be 400+
+            + 700+ lines on a real arXiv doc). Default: ``False`` --
+            semantics is OMITTED from the JSON output so agent-facing
+            consumers receive a clean payload. Use the
+            ``--include-semantics`` CLI flag (top-level ``pipeline.py``)
+            for debugging / corpus-analysis runs where the noisy metadata
+            is useful. The companion ``.umr.md`` NEVER carries semantics
+            regardless of this flag -- UMR is the agent-facing view.
+        fast_path: Per-page text-extraction backend. ``"docling"`` (default;
+            ``UIR_FAST_PATH=docling`` env var used in CI/tests) routes
+            Stages 2-5 through IBM Docling -- chunks come out pre-typed
+            (``heading`` / ``paragraph`` / ``table`` / ``figure`` /
+            ``caption``) instead of flattened prose. ``"pdfplumber"``
+            routes through pdfplumber + the heuristic LayoutClassifier
+            (faster, no 2 GB HuggingFace weight download). When the
+            docling branch raises :class:`DoclingUnavailable` (missing
+            transform stack OR HF weights), the orchestrator logs a
+            warning and transparently cascades to ``pdfplumber``.
 
-    Returns a :class:`PipelineResult` with the uir id, output path, and
-    counts of chunks + entities. Raises on ingest failure; logs and
-    continues on per-stage failures (the resulting UIR may be partial).
+    Returns:
+        A :class:`PipelineResult` with :attr:`PipelineResult.umr_path`
+        populated (the companion ``.umr.md`` file is always written
+        alongside ``.uir.json`` so agents have the same view that
+        :file:`templates/index.html` surfaces).
     """
     t0 = time.monotonic()
     p = Path(input_path)
@@ -292,32 +391,91 @@ def run(
     try:
         logger.info("ingested %s: %d pages, sha256=%s", doc.uri, doc.page_count, doc.sha256[:12])
 
-        # Stage 2/3 combined: open pdfplumber once and emit BOTH per-page
-        # text AND per-word geometries (Tier 1.5 #1). The previous build
-        # synthesised a full-canvas bbox per token, which masked the
-        # LayoutClassifier's ``_HEADER_Y_PX = 80`` heuristic and made
-        # every page produce a ``header`` region -- blocking downstream
-        # ``intent.region_kind`` clustering and ``section_path`` detection.
-        _progress("extract_text", 20)
-        page_data = _get_page_words_with_real_coords(p, page_numbers=page_numbers)
-        page_text_pairs: list[tuple[int, str]] = [(pn, text) for pn, _w, text in page_data]
-        ocr_pages: list[OCRPage] = [OCRPage(page_number=pn, words=words) for pn, words, _t in page_data]
-        _progress("synthesize_ocr", 30)
-
-        # Stage 4: heuristic layout classification
-        _progress("layout", 45)
-        layout = LayoutClassifier()
-        all_regions = []
-        for op in ocr_pages:
-            all_regions.extend(layout.classify(op, page_height_px=792))
-
-        # Stage 5: pdfplumber tables
-        _progress("tables", 55)
-        try:
-            table_drafts = extract_tables(p, page_numbers=page_numbers)
-        except Exception as exc:
-            logger.warning("tables extraction failed: %s", exc)
-            table_drafts = []
+        # Stage 2/3/4/5 -- fast_path routing (PLAN §17 §OCR follow-up).
+        # Production default is ``docling``: IBM Docling emits pre-typed
+        # sections / tables / figures / math natively so chunks come out
+        # structured instead of flattened prose. The heuristic
+        # :class:`LayoutClassifier` is skipped on that branch.
+        # :file:`tests/conftest.py` pins ``UIR_FAST_PATH=pdfplumber`` so
+        # CI doesn't pay the 2 GB HuggingFace weight download; pass
+        # ``fast_path="docling"`` (or set the env var) on a real dev
+        # machine to opt in. When the docling branch raises
+        # :class:`DoclingUnavailable` (missing dep OR HF model load
+        # failure), the orchestrator cascades to pdfplumber so legacy
+        # fixtures keep emitting valid UIR.
+        fast_path_resolved = _resolve_fast_path(fast_path)
+        all_regions: list = []
+        table_drafts: list = []
+        page_text_pairs: list[tuple[int, str]] = []
+        ocr_pages: list[OCRPage] = []
+        if fast_path_resolved == "docling":
+            try:
+                _progress("docling_extract", 18)
+                from uir_pipeline.docling_extract import (
+                    DoclingUnavailable,
+                    extract_with_docling,
+                )
+                from uir_pipeline.layout import LayoutLabel, LayoutRegion
+                dr = extract_with_docling(p)
+                all_regions = [
+                    LayoutRegion(
+                        label=LayoutLabel(r["label"]),
+                        text=r["text"],
+                        # Docling standard ``DocumentConverter`` output
+                        # doesn't expose a per-region logprob; surface a
+                        # ``0.9`` floor (matching the table-draft
+                        # convention below) so downstream consumers
+                        # apply their own confidence threshold rather
+                        # than treating ``1.0`` as "verified".
+                        confidence=0.9,
+                        bbox=tuple(r["bbox"]),
+                        page=int(r["page"]),
+                        reading_order=i + 1,
+                    )
+                    for i, r in enumerate(dr.regions)
+                ]
+                table_drafts = [_docling_to_table_draft(t) for t in dr.tables]
+                page_text_pairs = list(dr.page_texts)
+                _progress(
+                    "layout", 45,
+                    fast_path="docling",
+                    region_count=len(all_regions),
+                    table_count=len(table_drafts),
+                )
+                # NOTE: ``ocr_pages`` stays empty on the docling branch
+                # so the downstream ``figure_caption`` stage still runs
+                # PyMuPDF-based image rendering independently (the
+                # caption lane is orthogonal to text extraction).
+            except DoclingUnavailable as exc:
+                logger.warning(
+                    "docling fast-path unavailable (%s) -- cascading to pdfplumber",
+                    exc,
+                )
+                fast_path_resolved = "pdfplumber"
+        if fast_path_resolved == "pdfplumber":
+            _progress("extract_text", 20)
+            page_data = _get_page_words_with_real_coords(
+                p, page_numbers=page_numbers,
+            )
+            page_text_pairs = [(pn, text) for pn, _w, text in page_data]
+            ocr_pages = [
+                OCRPage(page_number=pn, words=words)
+                for pn, words, _t in page_data
+            ]
+            _progress("synthesize_ocr", 30)
+            # Stage 4: heuristic layout classification
+            _progress("layout", 45)
+            layout = LayoutClassifier()
+            all_regions = []
+            for op in ocr_pages:
+                all_regions.extend(layout.classify(op, page_height_px=792))
+            # Stage 5: pdfplumber tables
+            _progress("tables", 55)
+            try:
+                table_drafts = extract_tables(p, page_numbers=page_numbers)
+            except Exception as exc:
+                logger.warning("tables extraction failed: %s", exc)
+                table_drafts = []
 
         # Stage 5.5 (Tier 3, per PLAN_TIER3.md): image captioning.
         # Detects figure regions via pdfplumber.Page.images, renders each
@@ -525,10 +683,18 @@ def run(
             chunk_ids.append(ck_id)
             modal_features = dict(ck.modal_features) if ck.modal_features else {}
             if vectors is not None and i < len(vectors.vectors):
+                # Persist the actual float vector onto the chunk so
+                # intent_filter can rank by cosine similarity without
+                # re-loading BGE on every intent call. Rounded to 6 dp = the
+                # cosine ranking is unaffected (order is preserved; cosine
+                # range stays inside [-1, 1]). Older UIRs (pre-fix-#1) will
+                # simply lack this key -- intent_filter falls back to
+                # keyword-only match gracefully.
                 modal_features["vector"] = {
                     "dim": vectors.dim,
                     "model": "BAAI/bge-small-en-v1.5",
                     "chunk_index": i,
+                    "embedding": [round(float(v), 6) for v in vectors.vectors[i]],
                 }
             chunk_nodes.append(ChunkNode(
                 id=ck_id,
@@ -550,19 +716,33 @@ def run(
             if i > 0:
                 mf["preceding_chunk_id"] = {"chunk_id": chunk_ids[i - 1]}
             if i < len(chunk_nodes) - 1:
-                mf["following_chunk_id"] = {"chunk_id": chunk_ids[i + 1]}
+                mf["following_chunk_id"] = {"chunk_id": chunk_ids[i + 1]}        # Build entity records (UIR v1 doesn't carry per-entity id; the
+        # orchestrator keeps the index-based list). Gated on
+        # ``include_semantics`` so the agent-facing default JSON stays
+        # short -- collecting the entity + relationship lists is cheap
+        # (they're already filtered against the boilerplate regex), but
+        # PUBLISHING 411 entities + 736 relationships into the default
+        # JSON was the real-world complaint that drove the --include-
+        # semantics flag. When the flag is off we emit empty lists; the
+        # UIR schema validator (Pydantic) accepts the empty default.
+        entities: list[Entity] = []
+        relationships: list[Relationship] = []
+        topics_out: list[str] = []
+        if include_semantics:
+            entities = [
+                Entity(text=e.text, type=e.type, confidence=e.confidence)
+                for e in enrichment.entities
+            ]
+            relationships = [
+                Relationship(**{"from": r.from_text},
+                              to=r.to_text, type=r.type,
+                              confidence=r.confidence)
+                for r in enrichment.relationships
+            ]
+            topics_out = list(enrichment.topics)
 
-        # Build entity records (UIR v1 doesn't carry per-entity id; the
-        # orchestrator keeps the index-based list).
-        entities: list[Entity] = [
-            Entity(text=e.text, type=e.type, confidence=e.confidence)
-            for e in enrichment.entities
-        ]
-        relationships: list[Relationship] = [
-            Relationship(**{"from": r.from_text},
-                          to=r.to_text, type=r.type, confidence=r.confidence)
-            for r in enrichment.relationships
-        ]
+
+
 
         now = datetime.now(timezone.utc)
         provenance = Provenance(
@@ -627,15 +807,25 @@ def run(
             source=source,
             metadata=metadata,
             structure=Structure(type="hierarchical", root=root),
+            # Semantics block is gated behind ``include_semantics``. When
+            # the flag is off we publish an EMPTY Semantics object so the
+            # schema still validates but the JSON payload is hundreds of
+            # KB lighter on a real arXiv doc. Topics still get surfaced
+            # via UMR's eyebrow / future cross-references; they're cheap.
             semantics=Semantics(
                 entities=entities,
                 relationships=relationships,
-                topics=enrichment.topics,
+                topics=topics_out,
             ),
             provenance=provenance,
         )
 
-        # Stage 10: write JSON
+        # Stage 10: write JSON + UMR.
+        # UMR (Universal Markdown Representation) is the agent-friendly
+        # companion file emitted ALWAYS -- independent of the
+        # include_semantics flag. It carries no entities / relationships
+        # / topics; only the structured content LLM agents need. See
+        # ``src/uir_pipeline/umr.py`` for the rendering contract.
         out_dir = output_dir
         if not dry_run:
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -643,6 +833,30 @@ def run(
             out_path.write_text(uir.model_dump_json(indent=2))
         else:
             out_path = out_dir / f"{doc_id}.uir.json"  # virtual
+        # UMR is rendered from the in-memory UIRV1 (not the just-written
+        # JSON file) so a weaviate-networked deployment that disables
+        # disk writes for the JSON still gets the agent-facing markdown.
+        # ``umr_path`` reflects the path the file WOULD be at on disk;
+        # under ``dry_run=True`` the file is not written but the path is
+        # still informative for tests / future writers that opt in.
+        umr_path = out_dir / f"{doc_id}.umr.md"
+        try:
+            from uir_pipeline.umr import build_umr
+            # UMR consumes the parsed JSON dict shape (not the Pydantic
+            # model) so the renderer can be unit-tested independently.
+            umr_text = build_umr(json.loads(uir.model_dump_json()))
+            if not dry_run:
+                umr_path.write_text(umr_text)
+        except Exception as exc:
+            # UMR rendering is best-effort: if it fails we log and emit a
+            # minimal placeholder so downstream consumers can still
+            # surface something via the /api/umr/ endpoint instead of
+            # 404ing on a missing file.
+            logger.warning("UMR render failed (fail-soft): %s", exc)
+            if not dry_run:
+                umr_path.write_text(
+                    f"# UMR render failed\n\n_Exception:_ `{exc}`\n"
+                )
 
         # Stage 11: optional Weaviate upsert
         if not skip_weaviate and not dry_run and vectors is not None and all_chunks:
@@ -673,8 +887,9 @@ def run(
         return PipelineResult(
             uir_id=doc_id,
             out_path=out_path,
+            umr_path=umr_path,
             chunk_count=len(chunk_nodes),
-            entity_count=len(entities),
+            entity_count=len(entities) if include_semantics else 0,
             elapsed_seconds=round(elapsed, 3),
         )
     finally:

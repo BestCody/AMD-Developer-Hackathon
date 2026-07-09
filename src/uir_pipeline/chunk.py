@@ -1,11 +1,15 @@
-"""chunk -- token-bounded text segmentation respecting BGE's 512-token limit (Phase I).
+"""chunk -- paragraph-aware token-bounded text segmentation.
 
-PLAN.md \u00a79 Phase I exit:
+PLAN.md \u00a79 Phase I exit + empirical-eval follow-up:
     -- chunking produces 256-512 token chunks with 10-20% overlap
-    -- sentence boundaries honored when feasible
+    -- paragraph boundaries are the PRIMARY split (replaces the previous
+       sentence-bounded splitter that mid-paragraph spliced text the agent
+       received as "mangled")
     -- exports tokenizer count + bbox + page + confidence + modal_features
-    -- hard ceiling at BGE's 512-token input limit; chunks above that are
-       recursively halved (preserving overlap)
+    -- hard ceiling at BGE's 512-token input limit; single paragraphs that
+       overflow are recursively halved (preserving the safety mechanism)
+    -- overlap stitching uses a fixed small word-tail (≤16 words) so the
+       preceding chunk's tail does NOT bleed mid-sentence into the next
 
 Tokenizer MUST be BGE's :class:`AutoTokenizer` -- not tiktoken or any
 whitespace heuristic. Per PLAN.md \u00a79 Phase I: mismatch causes silent
@@ -43,11 +47,24 @@ MAX_CHUNK_TOKENS: Final[int] = DEFAULT_BGE_MAX_TOKENS  # 512 (BGE hard limit)
 _MAX_HALVE_DEPTH: Final[int] = 25
 
 # Sentence detector -- "." "!" "?" followed by whitespace + capital letter
-# (or opening bracket / quote). PLAN.md \u00a79 Phase I specifies "sentence
-# boundaries honored where feasible" -- this is a heuristic.
+# (or opening bracket / quote). Kept exported for :func:`_split_sentences`
+# backward-compat tests; the new core path is paragraph-aware.
 _SENT_END_RE: Final[re.Pattern[str]] = re.compile(
     r"(?<=[.!?])\s+(?=[A-Z(\[\"'\u201c])"
 )
+
+# Paragraph break detector. ``\n`` followed by any whitespace, then 1+
+# newlines (and any whitespace on the second line). Handles ``\n\n``,
+# ``\n\n\t``, ``\r\n\r\n`` etc. Single ``\n`` (a line-wrap inside a
+# paragraph) is NOT a paragraph break.
+_PARAGRAPH_BREAK_RE: Final[re.Pattern[str]] = re.compile(r"\n\s*\n+")
+
+# Fixed small word-tail overlap. The previous algorithm blew the overlap
+# budget into 20%+ of the target window AND clipped subword IDs, producing
+# fragments like "``##atrix``" that the BGE embedder treated as noise.
+# A 16-word tail keeps boundary retrieval recall while guaranteeing no
+# mid-sentence bleed (whitespace-split preserves every overlapping word).
+_OVERLAP_TAIL_WORDS: Final[int] = 16
 
 
 # ----------------------------------------------------------------------------
@@ -74,47 +91,95 @@ class ChunkDraft:
 
 
 # ----------------------------------------------------------------------------
-# Sentence splitter
+# Sentence splitter (legacy / retained)
 # ----------------------------------------------------------------------------
 
 def _split_sentences(text: str) -> list[str]:
-    """Split ``text`` at sentence boundaries (conservative regex)."""
+    """Split ``text`` at sentence boundaries (conservative regex).
+
+    Kept exported so legacy tests in :mod:`tests.test_chunk` continue to
+    pass without churn. NOT used in the production chunker path --
+    paragraph-aware bundling replaced sentence-bounded splitting to fix
+    the "mangled and spliced" agent-output bug surfaced in the empirical
+    eval.
+    """
     parts = _SENT_END_RE.split(text.strip())
     return [p.strip() for p in parts if p.strip()]
 
 
 # ----------------------------------------------------------------------------
-# Windowed splitter (greedy, sentence-bounded)
+# Paragraph splitter + bundler
 # ----------------------------------------------------------------------------
 
-def _split_by_tokens(text: str, target_tokens: int) -> list[str]:
-    """Greedy sentence-bounded split respecting ``target_tokens`` per segment.
+def _split_into_paragraphs(text: str) -> list[str]:
+    """Split ``text`` on ``\\n\\s*\\n+`` paragraph breaks.
 
-    Sentences whose own token count exceeds ``target_tokens`` are emitted
-    as standalone segments -- the :func:`_recursive_halve` step handles
-    the overflow.
+    Returns trimmed non-empty paragraphs in source order. Single ``\\n``
+    line wraps are preserved inside each paragraph (NOT used as a split
+    boundary). ``\\r\\n\\r\\n`` (Windows page-break-style) is also a
+    paragraph break via the ``\\n\\s*\\n+`` rule.
     """
-    sentences = _split_sentences(text)
-    segments: list[str] = []
+    blocks = _PARAGRAPH_BREAK_RE.split(text)
+    return [b.strip() for b in blocks if b.strip()]
+
+
+def _bundle_paragraphs_for_chunks(
+    paragraphs: list[str],
+    target_tokens: int,
+    max_tokens: int,
+) -> list[str]:
+    """Greedy bundle ``paragraphs`` into chunks respecting token envelopes.
+
+    Rules:
+        * Adding a paragraph that fits within ``max_tokens`` accumulates.
+        * When the buffer reaches ``target_tokens`` after accumulation,
+          flush the buffer as one chunk.
+        * When adding a paragraph would overflow ``max_tokens``, flush
+          the buffer first then start a new buffer.
+        * A SINGLE paragraph larger than ``max_tokens`` is recursively
+          halved (preserves the BGE 512-token ceiling while staying
+          inside the paragraph geometry).
+    """
+    chunks: list[str] = []
     buf: list[str] = []
     buf_tokens = 0
-    for sent in sentences:
-        tok = count_tokens(sent)
-        if tok >= target_tokens:
-            if buf:
-                segments.append(" ".join(buf))
-                buf, buf_tokens = [], 0
-            segments.append(sent)
+
+    def _flush() -> None:
+        nonlocal buf, buf_tokens
+        if buf:
+            # Re-join paragraphs with ``\\n\\n`` so a chunk's text preserves
+            # the original paragraph breaks. The agent downstream sees
+            # distinct paragraphs rather than a single joined line.
+            chunks.append("\n\n".join(buf).strip())
+            buf = []
+            buf_tokens = 0
+
+    for par in paragraphs:
+        par = par.strip()
+        if not par:
             continue
-        if buf_tokens + tok > target_tokens and buf:
-            segments.append(" ".join(buf))
-            buf, buf_tokens = [sent], tok
+        par_tok = count_tokens(par)
+        if par_tok > max_tokens:
+            # Genuinely oversized single paragraph -- recurse-halve.
+            # The bleed into other middle-oversized paragraphs is rare;
+            # flushing the buffer first keeps the small-paragraph output
+            # contiguous.
+            _flush()
+            chunks.extend(_recursive_halve(par, max_tokens))
+            continue
+        if buf_tokens + par_tok <= max_tokens:
+            buf.append(par)
+            buf_tokens += par_tok
+            if buf_tokens >= target_tokens:
+                _flush()
         else:
-            buf.append(sent)
-            buf_tokens += tok
-    if buf:
-        segments.append(" ".join(buf))
-    return segments
+            _flush()
+            buf.append(par)
+            buf_tokens = par_tok
+            if buf_tokens >= target_tokens:
+                _flush()
+    _flush()
+    return chunks
 
 
 # ----------------------------------------------------------------------------
@@ -124,37 +189,43 @@ def _split_by_tokens(text: str, target_tokens: int) -> list[str]:
 def _halve_at_whitespace(text: str) -> tuple[str, str]:
     """Halve ``text`` near its midpoint, snapping to the nearest whitespace.
 
-    Returns ``(left, right)`` where both pieces are non-empty when a
-    whitespace boundary existed. Falls back to a hard character-half
-    when ``text`` contains no whitespace at all.
+    Both halves are GUARANTEED to contain at least ``_MIN_HALVE_FRACTION``
+    (25%) of the input length -- this prevents :func:`_recursive_halve`
+    from looping forever on degenerate inputs (e.g., a giant whitespace-
+    less token, or a near-midpoint whitespace that produces an empty
+    left half, which then gets dropped by the caller and re-stitches the
+    right half back to the original -- the no-progress bug that
+    previously caused ``test_bundle_paragraphs_oversize_recurses`` to
+    return a single chunk for an actually-oversize paragraph).
     """
     n = len(text)
     if n < 2:
         return text, ""
     mid = n // 2
-    # Bounded sweep outward from the midpoint looking for whitespace.
+    min_half = max(1, n // 4)  # both halves must be >= 25% of ``n``.
     for radius in range(0, n // 2):
         for idx in (mid - radius, mid + radius):
-            if 0 <= idx < n and text[idx].isspace():
-                left = text[:idx].rstrip()
-                right = text[idx + 1:].lstrip()
-                if left and right:
-                    return left, right
-                # One side empty -- return both halves (the empty will be
-                # skipped by the caller, the non-empty side keeps all).
-                return left or right, right or left
-    # No whitespace -- hard character cut. Always non-empty for n >= 2.
+            if not (0 <= idx < n) or not text[idx].isspace():
+                continue
+            left = text[:idx].rstrip()
+            right = text[idx + 1:].lstrip()
+            if len(left) >= min_half and len(right) >= min_half:
+                return left, right
+    # No whitespace split produced two meaningfully smaller halves. Hard
+    # character cut -- always yields non-empty halves for ``n >= 2``.
     cut = max(1, mid)
-    return text[:cut], text[cut:]
+    return text[:cut].rstrip(), text[cut:].lstrip()
 
 
 def _recursive_halve(text: str, max_tokens: int, depth: int = 0) -> list[str]:
     """Halve ``text`` until each piece fits within ``max_tokens`` tokens.
 
     Uses whitespace-boundary halving (see :func:`_halve_at_whitespace`)
-    so no-progress blocks (e.g., one giant whitespace-less token) still
-    halve via a hard character cut. The recursion has a depth cap so
-    pathological inputs can't blow the stack.
+    with the ``_MIN_HALVE_FRACTION`` guarantee so each recursion
+    strictly shrinks the input -- no infinite loops on degenerate
+    whitespace layouts. Falls back to a hard character cut when no
+    whitespace boundary yields two meaningful halves. The recursion
+    has a depth cap so pathological inputs can't blow the stack.
     """
     text = text.strip()
     if not text:
@@ -171,14 +242,6 @@ def _recursive_halve(text: str, max_tokens: int, depth: int = 0) -> list[str]:
     if count_tokens(text) <= max_tokens:
         return [text]
     left, right = _halve_at_whitespace(text)
-    # Ensure each half is strictly smaller than the input -- otherwise
-    # we'd loop forever on pathological inputs. Fall back to a hard
-    # character-cut if whitespace-halving didn't make progress.
-    if (not left and not right) or (
-        len(left) >= len(text) or len(right) >= len(text)
-    ):
-        cut = max(1, len(text) // 2)
-        left, right = text[:cut], text[cut:]
     out: list[str] = []
     for p in (left, right):
         p = p.strip()
@@ -196,35 +259,52 @@ def _recursive_halve(text: str, max_tokens: int, depth: int = 0) -> list[str]:
 # ----------------------------------------------------------------------------
 
 def _with_overlap(segments: list[str], overlap_pct: int) -> list[str]:
-    """Re-stitch ``segments`` with ``overlap_pct`` % token overlap.
+    """Re-stitch ``segments`` with a small fixed word-tail overlap.
 
-    Overlap counts ``overlap_pct`` % of ``DEFAULT_CHUNK_TARGET_TOKENS``
-    so chunks share meaningful boundary context (PLAN.md \u00a79 Phase I
-    specifies 10-20%).
+    Replaces the previous overlap strategy whose decoded-subword tail
+    ("``tail + space + curr``" with N BGE-token subwords) bled mid-sentence
+    text into the next chunk. The new rule bounds the overlap to at most
+    :data:`_OVERLAP_TAIL_WORDS` (16) trailing words; previous chunks whose
+    tail is shorter than the limit are not extended. Words are split on
+    whitespace only -- no subword clipping -- so the overlap tail is
+    always made of complete words.
+
+    The overlap is also **cap-aware**: if naively stitching the full
+    word-tail would push the resulting chunk past BGE's :data:`MAX_CHUNK_TOKENS`
+    ceiling, the tail is trimmed word-by-word until the stitched chunk
+    fits. This guarantees per-chunk token counts respect the cap even
+    when ``_recursive_halve`` halved near (but not under) the cap.
     """
     if not segments or overlap_pct <= 0:
         return list(segments)
-    overlap_tokens = max(
+    pct_yield = max(
         1,
         round(DEFAULT_CHUNK_TARGET_TOKENS * overlap_pct / 100),
     )
+    word_tail = max(1, min(pct_yield, _OVERLAP_TAIL_WORDS))
+    # Minimum overlap word count -- keeps at least a couple of words of
+    # context even under aggressive cap-trimming. Falls through to
+    # no-overlap (just ``curr``) when ``curr`` alone is already >= cap.
+    _MIN_OVERLAP_WORDS: Final[int] = 2
     out: list[str] = [segments[0]]
-    tok = get_bge_tokenizer()
     for prev, curr in zip(segments, segments[1:]):
-        # Use whitespace word-split instead of decoding the last
-        # ``overlap_tokens`` BGE subword IDs. Slicing subword IDs at an
-        # arbitrary boundary can cut a piece of a token mid-token; decoding
-        # then yields ``##atrix``-style fragments that the BGE embedder
-        # treats as unrelated noise. Whitespace word-split keeps every
-        # prefix/suffix word intact at the cost of marginally looser
-        # overlap (a word may extend a few subwords past the boundary). The
-        # PLAN.md §9 chunk_token_count envelope still holds because the
-        # boundary is still well below the 512-token hard cap.
         prev_words = prev.split()
-        if len(prev_words) > overlap_tokens:
-            tail = " ".join(prev_words[-overlap_tokens:])
-            out.append((tail + " " + curr).strip())
-        else:
+        if len(prev_words) < _MIN_OVERLAP_WORDS:
+            out.append(curr)
+            continue
+        n_tail = min(word_tail, len(prev_words))
+        trimmed = False
+        while n_tail >= _MIN_OVERLAP_WORDS:
+            tail = " ".join(prev_words[-n_tail:])
+            stitched = (tail + " " + curr).strip()
+            if count_tokens(stitched) <= MAX_CHUNK_TOKENS:
+                out.append(stitched)
+                trimmed = True
+                break
+            n_tail -= 1
+        if not trimmed:
+            # ``curr`` alone was already >= cap -- emit as-is so the
+            # downstream ``count_tokens`` call can surface the overflow.
             out.append(curr)
     return out
 
@@ -247,7 +327,21 @@ def chunk_text(
     is_section_first: bool = False,
     is_section_last: bool = False,
 ) -> list[ChunkDraft]:
-    """Split ``text`` into token-bounded ``ChunkDraft``s.
+    """Split ``text`` into paragraph-aware token-bounded ``ChunkDraft``s.
+
+    Pipeline (replaces the previous sentence-bounded pipeline):
+
+    1. **Paragraph split** -- :func:`_split_into_paragraphs` on ``\\n\\s*\\n+``.
+       Single ``\\n`` line wraps stay inside the paragraph.
+    2. **Greedy bundling** -- :func:`_bundle_paragraphs_for_chunks` packs
+       paragraphs into chunks of ``target_tokens`` size, splitting only
+       when the next paragraph would exceed ``max_tokens``.
+    3. **Cap-size enforcement** -- any segment that exceeded ``max_tokens``
+       (a real path: a single 1k-token paragraph in a dense PDF) flows
+       through :func:`_recursive_halve`.
+    4. **Overlap stitching** -- :func:`_with_overlap` re-stitches with a
+       fixed ``_OVERLAP_TAIL_WORDS`` (16) word-tail overlap so the agent
+       downstream doesn't see subword-clipped fragments.
 
     ``target_tokens`` is the soft target per chunk (PLAN.md \u00a79 Phase I:
     256-512). ``overlap_pct`` is the boundary overlap (10-20%). ``max_tokens``
@@ -262,19 +356,20 @@ def chunk_text(
 
     page_bbox = bbox or (0, 0, 1000, 1000)
 
-    # Step 1: greedy sentence-bounded split at target window.
-    initial_segs = _split_by_tokens(text, target_tokens)
+    # Step 1: paragraph split on \n\s*\n+.
+    paragraphs = _split_into_paragraphs(text)
 
-    # Step 2: recursive halving so every segment fits within ``max_tokens``.
-    bounded: list[str] = []
-    for seg in initial_segs:
-        if count_tokens(seg) <= max_tokens:
-            if seg.strip():
-                bounded.append(seg)
-        else:
-            bounded.extend(_recursive_halve(seg, max_tokens))
+    # Step 2: greedy bundle paragraphs into target_tokens windows, with
+    # the cap-size safety valve for genuinely oversized single paragraphs.
+    bounded = _bundle_paragraphs_for_chunks(
+        paragraphs,
+        target_tokens=target_tokens,
+        max_tokens=max_tokens,
+    )
 
-    # Step 3: re-stitch with overlap.
+    # Step 3: re-stitch with a small fixed word-tail overlap. Paragraph
+    # geometry is preserved because the join step kept ``\n\n`` between
+    # paragraphs.
     with_overlap = _with_overlap(bounded, overlap_pct)
 
     drafts: list[ChunkDraft] = []
@@ -289,7 +384,7 @@ def chunk_text(
         modal_features: dict[str, dict[str, object]] = {
             "text": {
                 "token_count": count_tokens(seg, model_id),
-                "chunk_strategy": "growing-window-bge-tokenizer",
+                "chunk_strategy": "paragraph-aware-bge-tokenizer",
             },
         }
         if region_kind is not None:
@@ -321,7 +416,7 @@ def chunks_from_regions(
 
     Each region's text is chunked independently; every chunk emitted from
     the same region inherits that region's bbox. Tier 1 intent metadata is
-    NOT propagated here — callers wanting per-region ``region_kind`` or
+    NOT propagated here -- callers wanting per-region ``region_kind`` or
     ``section_path`` should call :func:`chunk_text` directly with the
     kwargs they need.
     """
@@ -344,4 +439,5 @@ __all__ = [
     "MIN_CHUNK_TOKENS",
     "chunk_text",
     "chunks_from_regions",
+    "_split_sentences",
 ]
