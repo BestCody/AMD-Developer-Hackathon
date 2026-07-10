@@ -106,6 +106,39 @@ Resetting a password does **not** invalidate existing sessions; rotate
 
 ---
 
+## Supported formats
+
+`format_router` classifies every input into one extraction lane. The CLI and
+the console both gate on `CONVERTIBLE_EXTENSIONS`, which is derived from that
+classification — so a format that stops being convertible leaves the allow-list
+automatically.
+
+| Lane | Formats | Extractor |
+|---|---|---|
+| `pdf` | `.pdf` | Docling on the **pypdfium2** backend |
+| `docling` | `.docx` `.xlsx` `.html` `.tex` `.epub` | Docling `DocumentConverter` |
+| `pptx` | `.pptx` | native `python-pptx` walk |
+| `text` | `.txt` `.md` `.csv` `.tsv` `.rtf` `.ipynb`, source code | read → paginate → chunk |
+| `image` | `.png` `.jpg` `.webp` … | Fireworks vision (needs `FIREWORKS_API_KEY`) |
+
+Notes on the non-obvious choices:
+
+- **PDF pins the pypdfium2 backend.** Docling's default (`docling-parse` v4)
+  raises a native `std::bad_alloc` on ordinary born-digital PDFs — a SIGSEGV
+  that takes the process with it. It is not a memory ceiling, and
+  `page_batch_size` has no effect on it.
+- **PPTX does not go through Docling.** Its layout model reads rendered page
+  images, and a generated deck has no rendering, so it returns zero regions.
+- **`.ipynb` does not either** — Docling's allow-list has no notebook format.
+  Cells are read directly; outputs are dropped rather than embedded.
+- **`.doc` / `.ppt` / `.xls`** are recognised but not convertible, and are
+  rejected at upload rather than accepted and failed later.
+
+OCR is decided per document (`DOCLING_OCR=auto`): a born-digital PDF skips it,
+a scan re-converts with it. See `.env.example`.
+
+---
+
 ## Modules (`src/uir_pipeline/`)
 
 | Module | Role | Notes |

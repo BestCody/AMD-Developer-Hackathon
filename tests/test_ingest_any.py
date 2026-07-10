@@ -444,3 +444,78 @@ def test_split_paragraphs_ignores_blank_input():
 
     assert _split_paragraphs("") == []
     assert _split_paragraphs("\n\n   \n") == []
+
+
+# ---------------------------------------------------------------------------
+# Markdown headings on the text lane
+# ---------------------------------------------------------------------------
+# Docling used to label headings for us. On the pageless lane nothing does, and
+# the chunker's section-path tracking only recognises *numbered* headings.
+
+def test_markdown_headings_are_labelled(tmp_path):
+    from uir_pipeline.layout import LayoutLabel
+    from uir_pipeline.pipeline import _run_text_route
+
+    p = tmp_path / "n.md"
+    p.write_text("# Title\n\nBody prose here.\n\n## Section\n\nMore prose.\n", encoding="utf-8")
+    regions, _ = _run_text_route(p, "MD")
+    labels = {r.text: r.label for r in regions}
+    assert labels["# Title"] is LayoutLabel.HEADING
+    assert labels["## Section"] is LayoutLabel.HEADING
+    assert labels["Body prose here."] is LayoutLabel.PARAGRAPH
+
+
+def test_a_fenced_code_block_is_not_a_markdown_heading(tmp_path):
+    from uir_pipeline.layout import LayoutLabel
+    from uir_pipeline.pipeline import _run_text_route
+
+    p = tmp_path / "n.md"
+    p.write_text("```python\n# a comment, not a heading\nx = 1\n```\n", encoding="utf-8")
+    (region,) = _run_text_route(p, "MD")[0]
+    assert region.label is LayoutLabel.PARAGRAPH
+
+
+def test_a_python_comment_is_not_a_heading(tmp_path):
+    """`.py` is not markdownish; a leading `#` is a comment."""
+    from uir_pipeline.layout import LayoutLabel
+    from uir_pipeline.pipeline import _run_text_route
+
+    p = tmp_path / "m.py"
+    p.write_text("# module docstring comment\n", encoding="utf-8")
+    (region,) = _run_text_route(p, "PY")[0]
+    assert region.label is LayoutLabel.PARAGRAPH
+
+
+def test_a_shebang_is_not_a_heading(tmp_path):
+    from uir_pipeline.layout import LayoutLabel
+    from uir_pipeline.pipeline import _run_text_route
+
+    p = tmp_path / "n.md"
+    p.write_text("#!/usr/bin/env python\n", encoding="utf-8")
+    (region,) = _run_text_route(p, "MD")[0]
+    assert region.label is LayoutLabel.PARAGRAPH
+
+
+def test_a_multiline_block_starting_with_hash_is_not_a_heading(tmp_path):
+    """A heading is one line; `# foo\nbar` is a paragraph that begins with '#'."""
+    from uir_pipeline.layout import LayoutLabel
+    from uir_pipeline.pipeline import _run_text_route
+
+    p = tmp_path / "n.md"
+    p.write_text("# Title\nimmediately followed by prose\n", encoding="utf-8")
+    (region,) = _run_text_route(p, "MD")[0]
+    assert region.label is LayoutLabel.PARAGRAPH
+
+
+def test_notebook_markdown_headings_are_labelled(tmp_path):
+    from uir_pipeline.layout import LayoutLabel
+    from uir_pipeline.pipeline import _run_text_route
+
+    p = _write_nb(tmp_path / "n.ipynb", [
+        {"cell_type": "markdown", "source": ["# Analysis"]},
+        {"cell_type": "code", "source": ["x = 1"], "outputs": []},
+    ])
+    regions, _ = _run_text_route(p, "IPYNB")
+    by_text = {r.text: r.label for r in regions}
+    assert by_text["# Analysis"] is LayoutLabel.HEADING
+    assert by_text["```python\nx = 1\n```"] is LayoutLabel.PARAGRAPH

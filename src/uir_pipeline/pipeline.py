@@ -285,13 +285,24 @@ def _run_text_route(path: Path, fmt: str) -> tuple[list[Any], list[tuple[int, st
     else:
         page_pairs = paginate_pageless(_read_text_file(path))
 
+    # Markdown (and notebook markdown cells) declare headings with `#`. Docling
+    # used to label them for us; on this lane nothing would, and the chunker's
+    # section-path tracking only recognises numbered headings.
+    markdownish = fmt_upper in ("MD", "MARKDOWN", "IPYNB")
+
     regions: list[Any] = []
     order = 0
     for page_no, page_text in page_pairs:
         for para in _split_paragraphs(page_text):
             order += 1
+            is_heading = (
+                markdownish
+                and para.startswith("#")
+                and not para.startswith("#!")  # a shebang is not a heading
+                and "\n" not in para           # a heading is one line
+            )
             regions.append(LayoutRegion(
-                label=LayoutLabel.PARAGRAPH,
+                label=LayoutLabel.HEADING if is_heading else LayoutLabel.PARAGRAPH,
                 text=para,
                 # Read verbatim off disk; nothing was inferred, so nothing is
                 # uncertain.
