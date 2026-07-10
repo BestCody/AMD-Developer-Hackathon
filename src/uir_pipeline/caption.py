@@ -18,7 +18,14 @@ import io
 import logging
 import os
 import threading
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
+
+if TYPE_CHECKING:  # pragma: no cover -- annotations only
+    # Pillow is a heavy optional dep: the string annotations below name
+    # `PIL.Image.Image`, but nothing ever bound `PIL`, so type checkers (and
+    # ruff's F821) saw an undefined name. Importing it here keeps the runtime
+    # import-free.
+    import PIL.Image
 
 logger = logging.getLogger(__name__)
 

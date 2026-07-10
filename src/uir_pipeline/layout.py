@@ -59,6 +59,9 @@ _HEADING_MAX_WORDS: int = 6
 
 # LayoutLMv3 default (per PLAN \\u00a76 -- standard transformers hub id).
 _DEFAULT_LAYOUTLMV3_MODEL_ID: str = "microsoft/layoutlmv3-base"
+#: Public alias. ``__all__`` has always named this, but only the private form
+#: existed, so ``from uir_pipeline.layout import *`` raised AttributeError.
+DEFAULT_LAYOUTLMV3_MODEL_ID: str = _DEFAULT_LAYOUTLMV3_MODEL_ID
 
 
 # ----------------------------------------------------------------------------

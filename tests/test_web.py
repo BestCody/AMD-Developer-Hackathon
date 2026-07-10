@@ -8,7 +8,6 @@ tests don't pull in BGE / spaCy / pdfplumber. Integration with the real
 from __future__ import annotations
 
 import json
-import threading
 import time
 from pathlib import Path
 
@@ -18,7 +17,6 @@ from uir_pipeline import pipeline as pipeline_mod
 from uir_pipeline.web import (
     JOB_DONE,
     JOB_ERROR,
-    JOB_RUNNING,
     create_app,
 )
 
@@ -242,7 +240,8 @@ def test_run_full_lifecycle(client, fake_run, sample_pdf):
     while time.monotonic() < deadline:
         s = client.get(f"/api/status/{job_id}").get_json()
         if s["status"] in (JOB_DONE, JOB_ERROR):
-            final = s; break
+            final = s
+            break
         time.sleep(0.05)
     assert final is not None, "job did not complete within timeout"
     assert final["status"] == JOB_DONE

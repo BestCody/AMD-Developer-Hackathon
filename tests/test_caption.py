@@ -6,8 +6,6 @@ OCR-leader stub pattern from ``tests/test_web.py``).
 """
 from __future__ import annotations
 
-import io
-from pathlib import Path
 
 import pytest
 
@@ -122,7 +120,6 @@ def test_detect_figure_regions_filters_tiny_bboxes(tmp_path):
     """detect_figure_regions should drop bboxes < min_dim_px in caption_figures_in_pdf."""
     pytest.importorskip("PIL")
     pytest.importorskip("pymupdf")
-    from PIL import Image
 
     # Render a tiny test PDF with a small image (decorative dot) via reportlab.
     pytest.importorskip("reportlab")
@@ -141,7 +138,7 @@ def test_detect_figure_regions_filters_tiny_bboxes(tmp_path):
     c.showPage()
     c.save()
 
-    from uir_pipeline.caption import caption_figures_in_pdf, MIN_FIGURE_DIM_PX
+    from uir_pipeline.caption import caption_figures_in_pdf
     # 10x10 < MIN_FIGURE_DIM_PX (50) -> the figure should be filtered out.
     out = caption_figures_in_pdf(pdf)
     assert out == []
@@ -301,7 +298,6 @@ def test_min_dim_filter_measures_on_the_canvas_not_a_rescaled_value():
     tiny = {"page": 1, "bbox": (10, 10, 30, 30), "kind": "picture"}
     dr = SimpleNamespace(pictures=[half_page, tiny])
 
-    captured: list[dict] = []
     caption_mod_images = caption_mod.caption_images
 
     def _fake_caption_images(images, **kw):

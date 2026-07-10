@@ -6,15 +6,13 @@ returns a ``Doc``-like with a customizable ``.ents`` list. This keeps
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 import pytest
 
 from uir_pipeline.enrich import (
     DEFAULT_SPACY_MODEL,
     EnrichmentResult,
     EntityDraft,
-    RelationshipDraft,
     _cooccurrence_relationships,
     _dedupe_entities,
     _spacy_entity_to_draft,

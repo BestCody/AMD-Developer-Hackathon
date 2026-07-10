@@ -16,8 +16,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 
 from uir_pipeline.utils import (

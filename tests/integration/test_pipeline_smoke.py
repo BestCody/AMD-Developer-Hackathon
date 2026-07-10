@@ -96,7 +96,6 @@ def test_pipeline_emits_zero_chunks_on_empty_pdf(tmp_path: Path) -> None:
     """
     import io
     from pypdf import PdfWriter
-    from pypdf.generic import RectangleObject
 
     # Generate a minimal 1-page PDF via pypdf (no reportlab dep).
     w = PdfWriter()

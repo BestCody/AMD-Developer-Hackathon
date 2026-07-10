@@ -345,8 +345,6 @@ def run(
 
     from uir_pipeline.chunk import chunk_text
     from uir_pipeline.embed import (
-        COLLECTION_CHUNKS,
-        COLLECTION_PARENT_DOCS,
         derive_doc_id,
         embed_texts,
         ensure_collections,
@@ -365,18 +363,15 @@ def run(
         ChunkNode,
         Entity,
         ExtractionProvenance,
-        Metadata,
         NormalizationProvenance,
         Provenance,
         Relationship,
         Semantics,
-        Source,
         Structure,
         StructureNode,
         UIRV1,
     )
     from uir_pipeline.utils import (
-        bbox_from_pixel,
         deterministic_node_id,
         strip_uir_prefix,
     )
@@ -438,7 +433,6 @@ def run(
         # real cause (missing dep OR HF model load failure).
         _progress("docling_extract", 18)
         from uir_pipeline.docling_extract import (
-            DoclingUnavailable,
             extract_with_docling,
         )
         from uir_pipeline.layout import LayoutLabel, LayoutRegion

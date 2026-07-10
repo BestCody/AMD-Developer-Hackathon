@@ -19,7 +19,6 @@ chunks contain known keywords so the filter is observable.
 from __future__ import annotations
 
 import json
-import threading
 import time
 from pathlib import Path
 

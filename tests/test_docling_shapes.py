@@ -191,14 +191,16 @@ class _FakeConverter:
 
 
 def test_partial_success_raises_instead_of_returning_a_truncated_document(tmp_path):
-    pdf = tmp_path / "x.pdf"; pdf.write_bytes(b"%PDF-1.4")
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
     conv = _FakeConverter("PARTIAL_SUCCESS", ["page 4: std::bad_alloc"])
     with pytest.raises(DoclingPartialConversion, match="only partially"):
         extract_with_docling(pdf, converter=conv)
 
 
 def test_partial_success_error_names_the_page_failure(tmp_path):
-    pdf = tmp_path / "x.pdf"; pdf.write_bytes(b"%PDF-1.4")
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
     conv = _FakeConverter("PARTIAL_SUCCESS", ["page 4: std::bad_alloc"])
     with pytest.raises(DoclingPartialConversion) as ei:
         extract_with_docling(pdf, converter=conv)
@@ -208,7 +210,8 @@ def test_partial_success_error_names_the_page_failure(tmp_path):
 
 def test_partial_success_can_be_opted_into(tmp_path, monkeypatch):
     monkeypatch.setenv("DOCLING_ALLOW_PARTIAL", "1")
-    pdf = tmp_path / "x.pdf"; pdf.write_bytes(b"%PDF-1.4")
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
     conv = _FakeConverter("PARTIAL_SUCCESS", ["page 4: std::bad_alloc"])
     out = extract_with_docling(pdf, converter=conv)
     assert len(out.regions) == 1  # the caller explicitly accepted the truncation
@@ -220,20 +223,23 @@ def test_partial_conversion_is_catchable_as_docling_unavailable():
 
 
 def test_failure_status_raises(tmp_path):
-    pdf = tmp_path / "x.pdf"; pdf.write_bytes(b"%PDF-1.4")
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
     with pytest.raises(DoclingUnavailable, match="status=FAILURE"):
         extract_with_docling(pdf, converter=_FakeConverter("FAILURE"))
 
 
 def test_success_status_passes_through(tmp_path):
-    pdf = tmp_path / "x.pdf"; pdf.write_bytes(b"%PDF-1.4")
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
     out = extract_with_docling(pdf, converter=_FakeConverter("SUCCESS"))
     assert len(out.regions) == 1
 
 
 def test_converter_without_a_status_attribute_is_accepted(tmp_path):
     """Older fakes / converters that expose no `status` must keep working."""
-    pdf = tmp_path / "x.pdf"; pdf.write_bytes(b"%PDF-1.4")
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
 
     class _NoStatus:
         def convert(self, _p):
@@ -347,7 +353,8 @@ def test_ocr_mode_resolution(monkeypatch):
 
 def test_auto_skips_ocr_on_a_born_digital_pdf(tmp_path, monkeypatch, _patched):
     monkeypatch.delenv("DOCLING_OCR", raising=False)
-    pdf = tmp_path / "x.pdf"; pdf.write_bytes(b"%PDF-1.4")
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
     rec = _patched([_doc_with(3, 800)])
 
     out = extract_with_docling(pdf)
@@ -357,7 +364,8 @@ def test_auto_skips_ocr_on_a_born_digital_pdf(tmp_path, monkeypatch, _patched):
 
 def test_auto_reconverts_with_ocr_when_the_pdf_looks_scanned(tmp_path, monkeypatch, _patched):
     monkeypatch.delenv("DOCLING_OCR", raising=False)
-    pdf = tmp_path / "x.pdf"; pdf.write_bytes(b"%PDF-1.4")
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
     # first pass: no glyphs. second pass (with OCR): text appears.
     rec = _patched([_doc_with(3, 0), _doc_with(3, 900)])
 
@@ -369,7 +377,8 @@ def test_auto_reconverts_with_ocr_when_the_pdf_looks_scanned(tmp_path, monkeypat
 def test_auto_does_not_reconvert_a_sparse_but_real_text_pdf(tmp_path, monkeypatch, _patched):
     """A title page + figures still clears the threshold on average."""
     monkeypatch.delenv("DOCLING_OCR", raising=False)
-    pdf = tmp_path / "x.pdf"; pdf.write_bytes(b"%PDF-1.4")
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
     rec = _patched([_doc_with(4, 60)])
 
     extract_with_docling(pdf)
@@ -378,7 +387,8 @@ def test_auto_does_not_reconvert_a_sparse_but_real_text_pdf(tmp_path, monkeypatc
 
 def test_ocr_off_never_reconverts_even_for_a_scan(tmp_path, monkeypatch, _patched):
     monkeypatch.setenv("DOCLING_OCR", "off")
-    pdf = tmp_path / "x.pdf"; pdf.write_bytes(b"%PDF-1.4")
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
     rec = _patched([_doc_with(3, 0)])
 
     out = extract_with_docling(pdf)
@@ -388,7 +398,8 @@ def test_ocr_off_never_reconverts_even_for_a_scan(tmp_path, monkeypatch, _patche
 
 def test_ocr_on_converts_once_with_ocr(tmp_path, monkeypatch, _patched):
     monkeypatch.setenv("DOCLING_OCR", "on")
-    pdf = tmp_path / "x.pdf"; pdf.write_bytes(b"%PDF-1.4")
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
     rec = _patched([_doc_with(2, 900)])
 
     extract_with_docling(pdf)
@@ -398,7 +409,8 @@ def test_ocr_on_converts_once_with_ocr(tmp_path, monkeypatch, _patched):
 def test_injected_converter_bypasses_ocr_resolution(tmp_path, monkeypatch):
     """Tests inject a converter; it must be used verbatim, exactly once."""
     monkeypatch.setenv("DOCLING_OCR", "auto")
-    pdf = tmp_path / "x.pdf"; pdf.write_bytes(b"%PDF-1.4")
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
 
     calls = []
 
