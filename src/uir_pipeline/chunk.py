@@ -28,7 +28,6 @@ from uir_pipeline.utils import (
     DEFAULT_CHUNK_OVERLAP_PCT,
     DEFAULT_CHUNK_TARGET_TOKENS,
     count_tokens,
-    get_bge_tokenizer,
 )
 
 logger = logging.getLogger(__name__)

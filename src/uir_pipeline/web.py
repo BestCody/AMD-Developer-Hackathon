@@ -1,11 +1,21 @@
-"""web -- Phase N minimal HTTP front-end for testing the pipeline.
+"""web -- HTTP front-end for the pipeline (the MonadLabs console).
 
 Routes:
-    GET  /                            -- single-page upload form
-    POST /api/run                     -- accepts ``file=<pdf>``, returns ``{job_id}``
+    GET  /                            -- the console SPA
+    GET  /api/health                  -- readiness probe (public)
+
+    POST /api/auth/signup             -- create an account, starts a session
+    POST /api/auth/login              -- start a session
+    POST /api/auth/logout             -- end the session
+    GET  /api/auth/me                 -- current user, or 401
+
+    POST /api/run                     -- accepts ``file=<doc>``, returns ``{job_id}``
+    GET  /api/jobs                    -- the caller's own jobs
     GET  /api/status/<job_id>         -- returns ``{status, progress, ...}``
-    GET  /api/download/<job_id>       -- streams the produced ``.uir.json`` file
-    GET  /api/health                   -- readiness probe
+    GET  /api/result/<job_id>         -- the UIR JSON, inline
+    GET  /api/umr/<job_id>            -- the UMR markdown companion
+    GET  /api/download/<job_id>       -- streams the produced ``.uir.json``
+    POST /api/chat                    -- grounded Q&A over the caller's documents
 
 Architecture:
     * ``create_app(...)`` returns a Flask application. Tests use this
@@ -17,19 +27,38 @@ Architecture:
     * The runner thread catches all exceptions and records them in the job
       dict so the front-end can surface them without crashing the worker.
 
-The web app is intentionally *simple* -- no auth, no queue, no Redis, no
-rate-limiting.  Keep it that way until we know what real users need.
+On auth (this file used to say "no auth; keep it that way"):
+    Accounts were added deliberately, not by drift. Every job now carries
+    the ``user_id`` that created it, and every job route checks ownership
+    before serving bytes -- without that, a session cookie would gate the
+    *UI* while any authenticated user could still read any other user's
+    document by guessing a job id. A mismatch returns 404, not 403, so the
+    job-id space cannot be probed for existence.
+
+    Jobs remain in an in-memory dict: they do not survive a restart, and
+    they are not shared across workers. Run this single-process. Users, by
+    contrast, live in SQLite (see :mod:`uir_pipeline.auth`).
 """
 from __future__ import annotations
 
+import atexit
+import functools
+import importlib
 import json
 import logging
+import multiprocessing
+import os
+import queue
+import re
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from urllib.parse import urlparse
 
 from flask import (
     Flask,
@@ -39,9 +68,319 @@ from flask import (
     render_template,
     request,
     send_file,
+    session,
 )
+# Routes return `(body, status)` tuples as well as bare Responses; that
+# union is exactly what Flask calls a ResponseReturnValue.
+from flask.typing import ResponseReturnValue
 
 logger = logging.getLogger(__name__)
+
+
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    """Read a boolean from the environment ('1', 'true', 'yes' are true)."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+# ----------------------------------------------------------------------------
+# Pipeline execution: process isolation
+# ----------------------------------------------------------------------------
+#
+# The orchestrator loads native code (Docling / pypdfium2 / torch). Under
+# memory pressure Docling's C++ layer raises ``std::bad_alloc`` and can abort
+# the process outright. A ``threading.Thread`` cannot survive that -- SIGSEGV
+# is not a Python exception, so the runner's ``except Exception`` never fires
+# and the whole Flask server dies with the job. Uploading a mid-sized PDF was
+# enough to take the console down.
+#
+# So the orchestrator runs in a child process. A crash there costs one job:
+# the parent sees a non-zero ``exitcode``, marks the job ``error``, and keeps
+# serving. This is the default. ``execution="thread"`` restores the old
+# in-process behaviour and exists for tests, which monkeypatch
+# ``pipeline.run`` in the parent -- a patch a spawned child cannot inherit.
+
+#: Import path of the orchestrator module. Overridable so a child process can
+#: be pointed at a lightweight stub (tests) without importing the real,
+#: heavyweight pipeline.
+PIPELINE_MODULE_ENV = "UIR_PIPELINE_MODULE"
+_DEFAULT_PIPELINE_MODULE = "uir_pipeline.pipeline"
+
+#: Seconds to wait for a child that has stopped reporting before giving up.
+_CHILD_JOIN_TIMEOUT = 15.0
+
+
+class PipelineWorkerCrash(RuntimeError):
+    """The pipeline child process died without reporting a result.
+
+    Almost always a native crash (SIGSEGV / abort) inside Docling or a
+    downstream C extension, or an OOM kill. Carries the exit code because
+    that is the only forensic signal the parent gets.
+    """
+
+
+class PipelineWorkerError(RuntimeError):
+    """The child raised a Python exception; its text is already formatted.
+
+    ``str(exc)`` is the child's ``"TypeName: message"``. ``_runner`` re-raises
+    nothing and copies this verbatim, so job errors read
+    ``DoclingPartialConversion: ...`` rather than
+    ``RuntimeError: DoclingPartialConversion: ...``.
+    """
+
+
+def _resolve_pipeline_module() -> Any:
+    return importlib.import_module(
+        os.environ.get(PIPELINE_MODULE_ENV) or _DEFAULT_PIPELINE_MODULE
+    )
+
+
+def _result_payload(result: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "out_path": str(getattr(result, "out_path", "")),
+        "uir_id": getattr(result, "uir_id", None),
+        "chunk_count": int(getattr(result, "chunk_count", 0)),
+        "entity_count": int(getattr(result, "entity_count", 0)),
+        "elapsed_seconds": float(getattr(result, "elapsed_seconds", 0.0)),
+    }
+    # Omit rather than blank: the parent's ``AttributeError`` fallback
+    # derives a sibling path, and Path("") silently means Path(".").
+    umr = getattr(result, "umr_path", None)
+    if umr:
+        payload["umr_path"] = str(umr)
+    return payload
+
+
+def _pipeline_worker_loop(job_q: Any, progress_q: Any, result_q: Any) -> None:
+    """Child-process entry point. Must stay importable at module scope.
+
+    Windows uses the ``spawn`` start method, which re-imports this module in
+    the child and unpickles the target by qualified name. A closure or a
+    nested function would not survive that.
+
+    The orchestrator is imported **once**, before the loop -- that import
+    pulls in torch and Docling and costs ~8s. Jobs then arrive over
+    ``job_q``, so only the first upload after a (re)spawn pays for it.
+
+    Every message carries the job id. The parent discards this whole worker
+    on a crash, so ids can't collide across workers; within one worker they
+    guard against a late message from an abandoned job being read as the
+    current one's result.
+    """
+    try:
+        mod = _resolve_pipeline_module()
+    except BaseException as exc:  # noqa: BLE001 -- a bad import must be reported, not hang
+        result_q.put((None, "error", f"{type(exc).__name__}: {exc}"))
+        return
+
+    while True:
+        message = job_q.get()
+        if message[0] == "stop":
+            return
+        _, job_id, upload_path, output_dir, intent = message
+
+        def _on_progress(stage: str, pct: int, _jid: str = job_id, **meta: Any) -> None:
+            try:
+                progress_q.put((_jid, str(stage), int(pct), dict(meta)))
+            except Exception:  # noqa: BLE001 -- progress is advisory, never fatal
+                pass
+
+        try:
+            result = mod.run(
+                Path(upload_path),
+                fast_path="docling",
+                output_dir=Path(output_dir),
+                skip_weaviate=True,
+                with_embeddings=True,
+                on_progress=_on_progress,
+                intent=intent,
+            )
+            result_q.put((job_id, "ok", _result_payload(result)))
+        except BaseException as exc:  # noqa: BLE001 -- one bad job must not end the worker
+            result_q.put((job_id, "error", f"{type(exc).__name__}: {exc}"))
+
+
+#: Environment the *child* reads at import/convert time. A spawned process
+#: inherits the parent's environment once, at spawn; changing one of these in
+#: a running server would otherwise have no effect until the worker happened
+#: to die, which is a confusing thing to debug. We fingerprint them and
+#: respawn on change.
+_WORKER_ENV_PREFIXES: tuple[str, ...] = ("DOCLING_", "UIR_PIPELINE_MODULE")
+
+
+def _worker_env_fingerprint() -> dict[str, str]:
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if any(k.startswith(p) for p in _WORKER_ENV_PREFIXES)
+    }
+
+
+class _WarmWorker:
+    """A single long-lived pipeline child process, respawned when it dies.
+
+    Spawning per job cost ~8s of `import torch`/`import docling` before any
+    work began -- more than the conversion itself on a small PDF. One
+    persistent child pays that once per server lifetime.
+
+    Crash isolation is unchanged: a native SIGSEGV inside Docling still kills
+    only the child. The parent notices, fails that one job, discards the
+    worker, and the next job spawns a replacement. That path is now rare
+    (the backend that caused the crashes is fixed), which is precisely why
+    it is safe to keep a worker alive across jobs.
+
+    Jobs are **serialised** by ``_lock``. The previous code could run several
+    conversions at once; each holds a Docling model set resident, and two
+    concurrent conversions of a real PDF do not fit in memory on a typical
+    dev box. Serialising is the honest behaviour, not a regression.
+
+    Started lazily on the first job: an idle server should not hold ~1.5 GB
+    of torch and Docling weights resident for uploads that never come.
+    """
+
+    def __init__(self) -> None:
+        self._ctx = multiprocessing.get_context("spawn")
+        self._lock = threading.Lock()
+        self._proc: Any = None
+        self._job_q: Any = None
+        self._progress_q: Any = None
+        self._result_q: Any = None
+        self._env: dict[str, str] = {}
+
+    # -- lifecycle ---------------------------------------------------------
+    def _spawn(self) -> None:
+        self._env = _worker_env_fingerprint()
+        self._job_q = self._ctx.Queue()
+        self._progress_q = self._ctx.Queue()
+        self._result_q = self._ctx.Queue()
+        self._proc = self._ctx.Process(
+            target=_pipeline_worker_loop,
+            args=(self._job_q, self._progress_q, self._result_q),
+            daemon=True,
+        )
+        self._proc.start()
+        logger.info("pipeline worker started (pid %s)", self._proc.pid)
+
+    def _discard(self) -> int | None:
+        """Tear the worker down and return its exit code."""
+        code = None
+        if self._proc is not None:
+            if self._proc.is_alive():
+                # It is parked on job_q.get() and will never exit on its own;
+                # without this the join below always burns its full timeout.
+                try:
+                    self._job_q.put(("stop",))
+                except Exception:  # noqa: BLE001
+                    pass
+            self._proc.join(timeout=_CHILD_JOIN_TIMEOUT)
+            if self._proc.is_alive():  # pragma: no cover -- child ignoring termination
+                self._proc.kill()
+                self._proc.join(timeout=5)
+            code = self._proc.exitcode
+        # The queues may hold half-written messages from the dead child; a
+        # fresh worker gets fresh queues rather than inheriting that debris.
+        for q in (self._job_q, self._progress_q, self._result_q):
+            try:
+                if q is not None:
+                    q.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._proc = self._job_q = self._progress_q = self._result_q = None
+        return code
+
+    def shutdown(self) -> None:
+        with self._lock:
+            self._discard()  # sends ("stop",) if the child is still alive
+
+    # -- job submission ----------------------------------------------------
+    def run(
+        self,
+        *,
+        upload_path: Path,
+        output_dir: Path,
+        intent: str | None,
+        on_progress: Any,
+    ) -> SimpleNamespace:
+        with self._lock:
+            if self._proc is not None and self._proc.is_alive():
+                current = _worker_env_fingerprint()
+                if current != self._env:
+                    changed = sorted(
+                        set(current) ^ set(self._env)
+                        | {k for k in current.keys() & self._env.keys()
+                           if current[k] != self._env[k]}
+                    )
+                    logger.info(
+                        "worker environment changed (%s); respawning so the "
+                        "child picks it up", ", ".join(changed),
+                    )
+                    self._discard()
+
+            if self._proc is None or not self._proc.is_alive():
+                if self._proc is not None:
+                    self._discard()
+                self._spawn()
+
+            job_id = uuid.uuid4().hex
+            self._job_q.put(
+                ("job", job_id, str(upload_path), str(output_dir), intent)
+            )
+            return self._collect(job_id, on_progress)
+
+    def _drain_progress(self, job_id: str, on_progress: Any) -> None:
+        while True:
+            try:
+                jid, stage, pct, meta = self._progress_q.get_nowait()
+            except (queue.Empty, OSError, EOFError, ValueError):
+                return
+            if jid == job_id:
+                on_progress(stage, pct, **meta)
+
+    def _collect(self, job_id: str, on_progress: Any) -> SimpleNamespace:
+        outcome: tuple[str, Any] | None = None
+        while True:
+            self._drain_progress(job_id, on_progress)
+            try:
+                jid, kind, payload = self._result_q.get(timeout=0.1)
+                # `jid is None` is the worker reporting a failed import.
+                if jid in (job_id, None):
+                    outcome = (kind, payload)
+                    break
+            except queue.Empty:
+                pass
+            except (OSError, EOFError, ValueError):
+                # The queue died with the child; fall through to the liveness
+                # check, which raises PipelineWorkerCrash with the exit code.
+                break
+            if not self._proc.is_alive():
+                # The child exited. Give the queue a moment to surface a
+                # result written just before exit, then decide.
+                try:
+                    jid, kind, payload = self._result_q.get(timeout=1.0)
+                    if jid in (job_id, None):
+                        outcome = (kind, payload)
+                except (queue.Empty, OSError, EOFError, ValueError):
+                    outcome = None
+                break
+
+        self._drain_progress(job_id, on_progress)
+
+        if outcome is None:
+            code = self._discard()
+            raise PipelineWorkerCrash(
+                f"pipeline worker died without reporting a result (exit code {code}). "
+                "This is typically a native crash or an out-of-memory kill inside "
+                "Docling. The server itself is unaffected."
+            )
+
+        kind, payload = outcome
+        if kind == "error":
+            if not self._proc.is_alive():
+                self._discard()  # a failed import leaves no usable worker
+            raise PipelineWorkerError(payload)
+        return SimpleNamespace(**payload)
 
 
 # ----------------------------------------------------------------------------
@@ -58,6 +397,14 @@ JOB_ERROR = "error"
 @dataclass
 class Job:
     job_id: str
+    #: The account that submitted this job. Every job route checks this
+    #: against the session before serving anything. ``None`` only for
+    #: jobs created by tests that bypass the auth layer.
+    user_id: int | None = None
+    #: Original filename as the browser reported it, sanitised to a bare
+    #: basename. Shown in the console's document folder -- the on-disk
+    #: name is ``<job_id><ext>`` and is not user-meaningful.
+    filename: str = ""
     status: str = JOB_QUEUED
     progress_stage: str = "queued"
     progress_percent: int = 0
@@ -124,6 +471,7 @@ class Job:
             }
         return {
             "job_id": self.job_id,
+            "filename": self.filename,
             "status": self.status,
             "stage": self.progress_stage,
             "percent": self.progress_percent,
@@ -144,41 +492,155 @@ def create_app(
     *,
     upload_dir: Path | None = None,
     output_dir: Path | None = None,
+    data_dir: Path | None = None,
     template_folder: Path | None = None,
     static_folder: Path | None = None,
     max_upload_mb: int = 64,
+    execution: str | None = None,
 ) -> Flask:
     """Build a Flask application with isolated per-instance state.
 
-    Tests use this factory with monkey-patched ``pipeline.run`` so they
-    don't pay the heavy-dep startup cost.
+    ``execution`` selects how the orchestrator is invoked:
+
+    ``"process"`` (default)
+        Run it in a child process so a native crash (Docling's
+        ``std::bad_alloc`` -> SIGSEGV) kills one job, not the server.
+    ``"thread"``
+        Run it in-process, the historical behaviour. Tests use this because
+        they monkeypatch ``pipeline.run`` in the parent, which a spawned
+        child cannot inherit.
+
+    Overridable via ``UIR_WEB_EXECUTION``.
     """
+    from uir_pipeline.auth import UserStore, resolve_secret_key
+    from uir_pipeline.conversations import ConversationStore
+
     upload_dir = (Path(upload_dir) if upload_dir else Path("/tmp/uir_web_uploads")).resolve()
     upload_dir.mkdir(parents=True, exist_ok=True)
     output_dir = (Path(output_dir) if output_dir else Path("/tmp/uir_web_outputs")).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     # Default templates/static fold under the package.
     _pkg_root = Path(__file__).resolve().parent
-    template_folder = str(template_folder or (_pkg_root.parent.parent / "templates"))
-    static_folder = str(static_folder or (_pkg_root.parent.parent / "static"))
+    _repo_root = _pkg_root.parent.parent
+    data_dir = (Path(data_dir) if data_dir else (_repo_root / "data")).resolve()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    # Distinct names: the parameters are `Path | None`, Flask wants `str`.
+    template_dir = str(template_folder or (_repo_root / "templates"))
+    static_dir = str(static_folder or (_repo_root / "static"))
 
     app = Flask(
         __name__,
-        template_folder=template_folder,
-        static_folder=static_folder,
+        template_folder=template_dir,
+        static_folder=static_dir,
     )
     app.config["MAX_CONTENT_LENGTH"] = max_upload_mb * 1024 * 1024
     app.config["UPLOAD_DIR"] = upload_dir
     app.config["OUTPUT_DIR"] = output_dir
 
+    execution = (execution or os.environ.get("UIR_WEB_EXECUTION") or "process").lower()
+    if execution not in ("process", "thread"):
+        raise ValueError(f"execution must be 'process' or 'thread', got {execution!r}")
+    app.config["EXECUTION"] = execution
+    if execution == "thread":
+        logger.warning(
+            "pipeline runs in-process (execution='thread'): a native crash in "
+            "Docling will take the whole server down with it."
+        )
+    # Per-app, not a module global: tests build several apps in one process and
+    # must not share a worker (nor its UIR_PIPELINE_MODULE, read at spawn time).
+    # Lazy -- no child exists until the first upload.
+    worker = _WarmWorker() if execution == "process" else None
+    app.config["PIPELINE_WORKER"] = worker
+    # NB: no atexit hook here. The factory is called once per test, and an
+    # atexit handler per app would (a) accumulate unboundedly and (b) fire at
+    # interpreter shutdown, after pytest has closed the streams the worker's
+    # logger writes to. The child is a daemon, so it dies with the parent
+    # regardless; the server entrypoint registers a clean stop explicitly.
+
+    # -------- session / auth --------------------------------------------
+    app.secret_key = resolve_secret_key(data_dir)
+    app.config.update(
+        # Signed session cookie. HttpOnly keeps it away from any XSS that
+        # slips through; SameSite=Lax is our primary CSRF defence, since a
+        # cross-site POST will not carry the cookie. Secure must be on for
+        # any HTTPS deploy -- it is off by default only because web.py's
+        # default bind is plain HTTP on the LAN.
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SECURE=_env_flag("SESSION_COOKIE_SECURE", default=False),
+        PERMANENT_SESSION_LIFETIME=timedelta(days=14),
+    )
+    users = UserStore(data_dir / "monadlabs.db")
+    app.config["USER_STORE"] = users
+    # Chats-panel threads live in the same SQLite file, one table set each.
+    conversations = ConversationStore(data_dir / "monadlabs.db")
+    app.config["CONVERSATION_STORE"] = conversations
+
     # Per-app job registry -- thread-safe by virtue of the GIL guarding dict
     # assignment + the lock below for read-modify-write on the Job itself.
     jobs: dict[str, Job] = {}
     jobs_lock = threading.Lock()
+    # Exposed for tests that need to seed a completed job without driving a
+    # full upload. It is the same dict the routes close over, not a copy.
+    app.config["JOBS"] = jobs
 
-    # Import the orchestrator lazily so tests with a stubbed module attribute
-    # can patch it before the runner thread is started.
-    from uir_pipeline import pipeline as _pipeline_mod
+    # -------- auth helpers ----------------------------------------------
+
+    def _current_user() -> dict[str, Any] | None:
+        uid = session.get("user_id")
+        if uid is None:
+            return None
+        user = users.get_by_id(int(uid))
+        if user is None:
+            # Account deleted out from under a live cookie.
+            session.clear()
+            return None
+        return user
+
+    def login_required(fn):
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any):
+            user = _current_user()
+            if user is None:
+                abort(401, description="Sign in to continue.")
+            request.user = user  # type: ignore[attr-defined]
+            return fn(*args, **kwargs)
+        return wrapper
+
+    def _owned_job(job_id: str) -> Job:
+        """Fetch a job the caller owns, or 404.
+
+        Deliberately 404 (not 403) when the job exists but belongs to
+        someone else: a 403 would confirm the id is real and turn the
+        job-id space into an oracle.
+        """
+        uid = request.user["id"]  # type: ignore[attr-defined]
+        job = jobs.get(job_id)
+        if job is None or job.user_id != uid:
+            abort(404, description="job not found")
+        return job
+
+    @app.before_request
+    def _reject_cross_origin_writes() -> Response | None:
+        """Defence-in-depth CSRF check on state-changing requests.
+
+        ``SameSite=Lax`` already stops a cross-site form POST from
+        carrying the session cookie. This adds a same-origin assertion so
+        the protection does not rest on one browser behaviour alone.
+        Requests with no Origin header (curl, same-origin GET) pass.
+        """
+        if request.method in ("GET", "HEAD", "OPTIONS"):
+            return None
+        origin = request.headers.get("Origin")
+        if not origin:
+            return None
+        if urlparse(origin).netloc != request.host:
+            logger.warning(
+                "rejected cross-origin %s %s from Origin=%s",
+                request.method, request.path, origin,
+            )
+            abort(403, description="cross-origin request rejected")
+        return None
 
     def _runner(job: Job) -> None:
         """Background thread body -- runs the pipeline and updates the Job."""
@@ -200,14 +662,40 @@ def create_app(
                     with jobs_lock:
                         job.stage_meta = dict(meta)
 
-            result = _pipeline_mod.run(                  job.upload_path,
-                  fast_path="docling",  # web pins Docling (single backend; docling failures propagate)
-                  output_dir=app.config["OUTPUT_DIR"],
-                skip_weaviate=True,        # web UX: skip Weaviate by default
-                with_embeddings=True,
-                on_progress=_on_progress,
-                intent=job.intent,
-            )
+            if job.upload_path is None:  # pragma: no cover -- set before dispatch
+                raise RuntimeError(f"job {job.job_id} has no upload path")
+
+            # Branch on the worker, not on `execution`: the worker is None
+            # exactly when execution == "thread", and this way the two can
+            # never disagree.
+            #
+            # The two branches return different types -- a SimpleNamespace
+            # rebuilt from the child's payload, or a real PipelineResult. Only
+            # the attributes read below are common to both.
+            result: Any
+            if worker is not None:
+                # Isolated: a SIGSEGV inside Docling costs this job only.
+                result = worker.run(
+                    upload_path=job.upload_path,
+                    output_dir=app.config["OUTPUT_DIR"],
+                    intent=job.intent,
+                    on_progress=_on_progress,
+                )
+            else:
+                # Imported here, not at factory time: in "process" mode the
+                # parent never needs the heavy orchestrator, and tests patch
+                # ``pipeline.run`` on the module object before this resolves it.
+                from uir_pipeline import pipeline as _pipeline_mod
+
+                result = _pipeline_mod.run(
+                    job.upload_path,
+                    fast_path="docling",  # web pins Docling (single backend; docling failures propagate)
+                    output_dir=app.config["OUTPUT_DIR"],
+                    skip_weaviate=True,   # web UX: skip Weaviate by default
+                    with_embeddings=True,
+                    on_progress=_on_progress,
+                    intent=job.intent,
+                )
             _advance(job, JOB_RUNNING, "done", 100, lock=jobs_lock)
             with jobs_lock:
                 job.uir_path = Path(result.out_path)
@@ -244,7 +732,7 @@ def create_app(
                 # poison the job (the front-end will simply omit the
                 # pill).
                 try:
-                    uir_doc = json.loads(job.uir_path.read_text())
+                    uir_doc = json.loads(job.uir_path.read_text(encoding="utf-8"))
                     source_meta = (uir_doc.get("source") or {}) \
                         if isinstance(uir_doc, dict) else {}
                     job.result["source_format"] = str(
@@ -296,9 +784,12 @@ def create_app(
                             }
                             intent_umr_path.write_text(
                                 _build_umr(
-                                    json.loads(job.intent_uir_path.read_text()),
+                                    json.loads(
+                                        job.intent_uir_path.read_text(encoding="utf-8")
+                                    ),
                                     intent_filter=intent_filter_arg,
-                                )
+                                ),
+                                encoding="utf-8",
                             )
                             job.intent_umr_path = intent_umr_path
                         except Exception as exc:  # noqa: BLE001 -- best-effort
@@ -336,21 +827,94 @@ def create_app(
             logger.exception("web job %s failed", job.job_id)
             with jobs_lock:
                 job.status = JOB_ERROR
-                job.error = f"{type(exc).__name__}: {exc}"
+                # A PipelineWorkerError already carries the child's
+                # "TypeName: message"; re-prefixing would double it up.
+                job.error = (
+                    str(exc) if isinstance(exc, PipelineWorkerError)
+                    else f"{type(exc).__name__}: {exc}"
+                )
                 job.finished_at = time.time()
 
     # -------- routes ----------------------------------------------------
 
     @app.get("/")
-    def index() -> Response:
-        return render_template("index.html", max_upload_mb=max_upload_mb)
+    def index() -> ResponseReturnValue:
+        return render_template("console.html", max_upload_mb=max_upload_mb)
 
     @app.get("/api/health")
-    def health() -> Response:
+    def health() -> ResponseReturnValue:
         return jsonify({"ok": True, "upload_dir": str(upload_dir)})
 
+    # -------- auth ------------------------------------------------------
+
+    def _json_body() -> dict[str, Any]:
+        body = request.get_json(silent=True)
+        return body if isinstance(body, dict) else {}
+
+    @app.post("/api/auth/signup")
+    def api_signup() -> ResponseReturnValue:
+        from uir_pipeline.auth import AuthError
+
+        body = _json_body()
+        try:
+            user = users.create_user(
+                body.get("email") or "",
+                body.get("password") or "",
+                body.get("name") or "",
+            )
+        except AuthError as exc:
+            return jsonify({"error": str(exc)}), 400
+        session.clear()
+        session["user_id"] = user["id"]
+        session.permanent = True
+        return jsonify({"user": user})
+
+    @app.post("/api/auth/login")
+    def api_login() -> ResponseReturnValue:
+        from uir_pipeline.auth import AuthError, RateLimited
+
+        body = _json_body()
+        ip = request.remote_addr or "-"
+        try:
+            user = users.verify_user(
+                body.get("email") or "", body.get("password") or "", ip=ip,
+            )
+        except RateLimited as exc:
+            return jsonify({"error": str(exc)}), 429
+        except AuthError as exc:
+            return jsonify({"error": str(exc)}), 401
+        # Rotate the session id on privilege change to blunt session fixation.
+        session.clear()
+        session["user_id"] = user["id"]
+        session.permanent = True
+        return jsonify({"user": user})
+
+    @app.post("/api/auth/logout")
+    def api_logout() -> ResponseReturnValue:
+        session.clear()
+        return jsonify({"ok": True})
+
+    @app.get("/api/auth/me")
+    def api_me() -> ResponseReturnValue:
+        user = _current_user()
+        if user is None:
+            return jsonify({"error": "not authenticated"}), 401
+        return jsonify({"user": user})
+
+    # -------- jobs ------------------------------------------------------
+
+    @app.get("/api/jobs")
+    @login_required
+    def api_jobs() -> ResponseReturnValue:
+        uid = request.user["id"]  # type: ignore[attr-defined]
+        with jobs_lock:
+            mine = [j.to_public() for j in jobs.values() if j.user_id == uid]
+        mine.sort(key=lambda j: j["submitted_at"])
+        return jsonify({"jobs": mine})
+
     @app.post("/api/run")
-    def api_run() -> Response:
+    @login_required
+    def api_run() -> ResponseReturnValue:
         if "file" not in request.files:
             abort(400, description="missing 'file' field in multipart upload")
         upload = request.files["file"]
@@ -359,10 +923,13 @@ def create_app(
         # PLAN §17 §Multi-format follow-up: the pipeline now routes a
         # dozen+ formats through PDF / DOCLING / PPTX_NATIVE / TEXT /
         # IMAGE -- the upload form should accept everything the
-        # orchestrator can ingest. We use the format_router's canonical
-        # SUPPORTED_EXTENSIONS list as the source of truth so a future
-        # format addition is a one-line change.
-        from uir_pipeline.format_router import SUPPORTED_EXTENSIONS
+        # orchestrator can ingest, and nothing it cannot.
+        #
+        # CONVERTIBLE_EXTENSIONS, not SUPPORTED_EXTENSIONS: the latter also
+        # names the legacy binary Office formats (.doc/.ppt/.xls), which the
+        # router recognises but classifies SKIP. Gating on it accepted the
+        # upload and then failed the job seconds later inside `ingest_any`.
+        from uir_pipeline.format_router import CONVERTIBLE_EXTENSIONS
         # Path(...).name strips any directory components a malicious
         # client might have inserted (the FileStorage.filename is taken
         # from the multipart Content-Disposition verbatim). ``suffix``
@@ -370,10 +937,10 @@ def create_app(
         # upload has none.
         safe_name = Path(upload.filename).name
         ext = Path(safe_name).suffix.lower()
-        if ext not in SUPPORTED_EXTENSIONS:
+        if ext not in CONVERTIBLE_EXTENSIONS:
             abort(400, description=(
                 f"unsupported file type {ext!r}; supported: "
-                f"{', '.join(sorted(SUPPORTED_EXTENSIONS))}"
+                f"{', '.join(sorted(CONVERTIBLE_EXTENSIONS))}"
             ))
 
         job_id = uuid.uuid4().hex
@@ -393,7 +960,13 @@ def create_app(
         # an opt-in text input alongside the file picker.
         intent_str = (request.form.get("intent") or "").strip() or None
 
-        job = Job(job_id=job_id, upload_path=saved, intent=intent_str)
+        job = Job(
+            job_id=job_id,
+            user_id=request.user["id"],  # type: ignore[attr-defined]
+            filename=safe_name,
+            upload_path=saved,
+            intent=intent_str,
+        )
         with jobs_lock:
             jobs[job_id] = job
 
@@ -402,26 +975,25 @@ def create_app(
         return jsonify({"job_id": job_id, "status_url": f"/api/status/{job_id}"})
 
     @app.get("/api/status/<job_id>")
-    def api_status(job_id: str) -> Response:
+    @login_required
+    def api_status(job_id: str) -> ResponseReturnValue:
         with jobs_lock:
-            job = jobs.get(job_id)
-            if job is None:
-                abort(404, description="job not found")
+            job = _owned_job(job_id)
             return jsonify(job.to_public())
 
     @app.get("/api/download/<job_id>")
-    def api_download(job_id: str) -> Response:
+    @login_required
+    def api_download(job_id: str) -> ResponseReturnValue:
         with jobs_lock:
-            job = jobs.get(job_id)
-            if job is None:
-                abort(404, description="job not found")
+            job = _owned_job(job_id)
             if job.status != JOB_DONE or job.uir_path is None:
                 abort(409, description=f"job not done (status={job.status})")
             path = job.uir_path
         return send_file(path, as_attachment=True, download_name=path.name)
 
     @app.get("/api/result/<job_id>")
-    def api_result(job_id: str) -> Response:
+    @login_required
+    def api_result(job_id: str) -> ResponseReturnValue:
         """Serve the (intent-filtered, if set) UIR document JSON inline.
 
         When the user submitted an optional ``intent`` form field on
@@ -432,9 +1004,7 @@ def create_app(
         streams the *full* file so users can save the complete archive.
         """
         with jobs_lock:
-            job = jobs.get(job_id)
-            if job is None:
-                abort(404, description="job not found")
+            job = _owned_job(job_id)
             if job.status != JOB_DONE or job.uir_path is None:
                 abort(409, description=f"job not done (status={job.status})")
             path = job.intent_uir_path or job.uir_path
@@ -446,7 +1016,8 @@ def create_app(
         )
 
     @app.get("/api/umr/<job_id>")
-    def api_umr(job_id: str) -> Response:
+    @login_required
+    def api_umr(job_id: str) -> ResponseReturnValue:
         """Serve the UMR Markdown companion file (Phase 17).
 
         When the user submitted an ``intent`` field, the narrowed
@@ -461,9 +1032,7 @@ def create_app(
         for power users / corpus debugging.
         """
         with jobs_lock:
-            job = jobs.get(job_id)
-            if job is None:
-                abort(404, description="job not found")
+            job = _owned_job(job_id)
             if job.status != JOB_DONE or job.umr_path is None:
                 abort(409, description=f"job not done (status={job.status})")
             # Prefer the intent-filtered UMR when intent was supplied;
@@ -487,11 +1056,207 @@ def create_app(
             download_name=candidate.name,
         )
 
+    # -------- chat ------------------------------------------------------
+
+    def _grounded_answer(
+        uid: int, message: str, history: list[Any], *,
+        job_ids: set[str] | None = None,
+    ) -> tuple[dict[str, Any], int]:
+        """Answer ``message`` from the caller's own documents.
+
+        Returns ``(payload, status)``. Retrieval spans every ``done`` job the
+        caller owns, filtered to ``job_ids`` when given. Jobs belonging to
+        anyone else are excluded before retrieval, so the model never sees a
+        passage from a document the caller cannot already read. Shared by
+        ``/api/chat`` and the Chats panel's ``gemini:`` command so the two
+        cannot drift.
+        """
+        from uir_pipeline import chat as _chat
+
+        with jobs_lock:
+            paths = [
+                job.uir_path
+                for job in jobs.values()
+                if job.user_id == uid
+                and job.status == JOB_DONE
+                and job.uir_path is not None
+                and (job_ids is None or job.job_id in job_ids)
+            ]
+
+        if not paths:
+            # Same key set as a successful answer so no caller special-cases it.
+            return {
+                "answer": (
+                    "You haven't converted any documents yet. Upload one and "
+                    "I'll be able to answer questions about it."
+                ),
+                "citations": [],
+                "cited": [],
+                "invalid_citations": [],
+                "grounded": False,
+                "model": None,
+            }, 200
+
+        contexts = _chat.retrieve(paths, message)
+        result = _chat.answer(message, contexts, history=history)
+
+        if not result["success"]:
+            # The model call failed (missing key, upstream 5xx). Surface it
+            # rather than inventing a reply.
+            return {"error": result["error"]}, 502
+
+        return {
+            "answer": result["answer"],
+            "citations": result["citations"],
+            # Which passages the answer actually cites, and any numbers the
+            # model invented (already stripped from `answer`). The UI can show
+            # only the cited sources instead of all six retrieved ones.
+            "cited": result.get("cited", []),
+            "invalid_citations": result.get("invalid_citations", []),
+            "grounded": result.get("grounded", False),
+            "model": result.get("model"),
+        }, 200
+
+    @app.post("/api/chat")
+    @login_required
+    def api_chat() -> ResponseReturnValue:
+        """Answer a question grounded in the caller's converted documents.
+
+        Retrieval spans every ``done`` job the caller owns, unless the
+        body narrows it with ``job_ids``.
+        """
+        body = _json_body()
+        message = (body.get("message") or "").strip()
+        if not message:
+            return jsonify({"error": "message is required"}), 400
+
+        uid = request.user["id"]  # type: ignore[attr-defined]
+        job_ids: set[str] | None = None
+        if isinstance(body.get("job_ids"), list):
+            job_ids = {str(j) for j in body["job_ids"]}
+        history_raw = body.get("history")
+        history: list[Any] = history_raw if isinstance(history_raw, list) else []
+
+        payload, status = _grounded_answer(uid, message, history, job_ids=job_ids)
+        return jsonify(payload), status
+
+    # -------- conversations (Chats panel) -------------------------------
+
+    @app.get("/api/conversations")
+    @login_required
+    def api_conversations_list() -> ResponseReturnValue:
+        email = request.user["email"]  # type: ignore[attr-defined]
+        return jsonify({"conversations": conversations.list_for_email(email)})
+
+    @app.post("/api/conversations")
+    @login_required
+    def api_conversations_create() -> ResponseReturnValue:
+        """Start (or reopen) a 1:1 thread with the person at ``peer_email``.
+
+        The peer need not have an account: membership is by email, so they
+        see the thread when they sign up with that address. We do not check
+        whether the address is registered, both to keep the flow simple and
+        to avoid turning this into an account-enumeration oracle.
+        """
+        from uir_pipeline.conversations import ConversationError
+
+        email = request.user["email"]  # type: ignore[attr-defined]
+        body = _json_body()
+        try:
+            convo, created = conversations.create_with(email, body.get("peer_email") or "")
+        except ConversationError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify({"conversation": convo}), (201 if created else 200)
+
+    @app.delete("/api/conversations/<int:cid>")
+    @login_required
+    def api_conversations_delete(cid: int) -> ResponseReturnValue:
+        email = request.user["email"]  # type: ignore[attr-defined]
+        # 404 (not 403) for a non-member id: never confirm it exists.
+        if not conversations.leave(email, cid):
+            abort(404, description="conversation not found")
+        return jsonify({"ok": True})
+
+    @app.get("/api/conversations/<int:cid>/messages")
+    @login_required
+    def api_conversation_messages(cid: int) -> ResponseReturnValue:
+        email = request.user["email"]  # type: ignore[attr-defined]
+        convo = conversations.get_for_email(email, cid)
+        if convo is None:
+            abort(404, description="conversation not found")
+        return jsonify({
+            "conversation": convo,
+            "messages": conversations.list_messages(cid),
+        })
+
+    @app.post("/api/conversations/<int:cid>/messages")
+    @login_required
+    def api_conversation_send(cid: int) -> ResponseReturnValue:
+        """Post a message to a thread the caller is a member of.
+
+        A plain message is stored as the caller's message (the other member
+        sees it). A message beginning with the ``gemini:`` trigger is stored
+        verbatim, then its remainder is answered from the *sender's* own
+        documents and the reply is stored as a shared ``assistant`` message
+        both members see. The user message is persisted before the model
+        runs, so a model outage never loses what the user typed.
+        """
+        email = request.user["email"]  # type: ignore[attr-defined]
+        uid = request.user["id"]  # type: ignore[attr-defined]
+        convo = conversations.get_for_email(email, cid)
+        if convo is None:
+            abort(404, description="conversation not found")
+
+        body = _json_body()
+        text = (body.get("text") or "").strip()
+        if not text:
+            return jsonify({"error": "text is required"}), 400
+
+        question = _gemini_question(text)
+        if question is not None and not question:
+            return jsonify({"error": "Add a question after 'gemini:'."}), 400
+
+        user_msg = conversations.add_message(cid, "user", text, sender_email=email)
+
+        if question is None:
+            # Ordinary message between the two people -- nothing to answer.
+            return jsonify({"user_message": user_msg, "reply": None})
+
+        # Model history: this thread's prior gemini exchanges only -- the
+        # stripped questions and the assistant answers. Ordinary person-to-
+        # person messages are not part of the model dialogue.
+        history: list[dict[str, Any]] = []
+        for m in conversations.list_messages(cid):
+            if m["id"] == user_msg["id"]:
+                continue
+            if m["role"] == "assistant":
+                history.append({"role": "assistant", "content": m["content"]})
+            else:
+                q = _gemini_question(m["content"])
+                if q:
+                    history.append({"role": "user", "content": q})
+
+        payload, status = _grounded_answer(uid, question, history)
+        if status != 200:
+            # Model failed. The user message is already saved; surface the
+            # error without fabricating an assistant reply.
+            return jsonify({"user_message": user_msg, "error": payload.get("error")}), 502
+
+        reply = conversations.add_message(
+            cid, "assistant", payload["answer"],
+            citations=payload.get("cited") or payload.get("citations") or [],
+            grounded=bool(payload.get("grounded")),
+        )
+        return jsonify({"user_message": user_msg, "reply": reply})
+
     @app.errorhandler(400)
+    @app.errorhandler(401)
+    @app.errorhandler(403)
     @app.errorhandler(404)
     @app.errorhandler(409)
     @app.errorhandler(413)
-    def _handle_http_err(exc: Any) -> Response:
+    @app.errorhandler(429)
+    def _handle_http_err(exc: Any) -> ResponseReturnValue:
         return jsonify({"error": exc.description if hasattr(exc, "description") else str(exc)}), exc.code
 
     return app
@@ -516,13 +1281,96 @@ def _advance(
         job.progress_percent = max(0, min(100, int(percent)))
 
 
+#: The Chats panel's inline-assistant trigger. A message whose first
+#: non-space characters are ``gemini:`` (any case) is a command: the text
+#: after the colon is answered from the caller's documents. The keyword is
+#: literally "gemini" by product request, even though the backend model is
+#: Fireworks -- it is the user-facing invocation word, not a model id.
+_GEMINI_PREFIX = re.compile(r"^\s*gemini:\s*", re.IGNORECASE)
+
+
+def _gemini_question(text: str) -> str | None:
+    """Return the question after a ``gemini:`` trigger, else ``None``.
+
+    ``None`` means "not a command, store as a plain note". An empty string
+    means "was a command but nothing followed the colon" -- the caller
+    rejects that rather than sending the model an empty prompt.
+    """
+    m = _GEMINI_PREFIX.match(text or "")
+    if not m:
+        return None
+    return text[m.end():].strip()
+
+
+#: Hosts whose traffic never leaves the machine.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def is_loopback_host(host: str) -> bool:
+    return (host or "").strip().lower() in _LOOPBACK_HOSTS
+
+
+def assert_safe_bind(host: str, port: int) -> None:
+    """Refuse to serve auth over plain HTTP on a routable interface.
+
+    Passwords are POSTed and the session cookie is replayed on every request.
+    Over plain HTTP both cross the network in cleartext, so anyone on the same
+    wifi can read them or steal the session outright. Loopback is fine -- the
+    traffic never leaves the machine. A routable bind is not, unless a TLS
+    terminator sits in front, which is exactly what ``SESSION_COOKIE_SECURE``
+    asserts.
+
+    Every entrypoint must call this. ``web.py`` at the repo root is the one
+    the README tells people to run, and it binds ``0.0.0.0`` by history.
+
+    Raises:
+        SystemExit: routable bind, no TLS, no explicit override.
+    """
+    if is_loopback_host(host) or _env_flag("SESSION_COOKIE_SECURE", default=False):
+        return
+    if not _env_flag("UIR_ALLOW_INSECURE_BIND", default=False):
+        raise SystemExit(
+            f"Refusing to serve on {host}:{port} over plain HTTP.\n"
+            "This console has user accounts: passwords and session cookies "
+            "would cross the network in cleartext.\n\n"
+            "  - Put a TLS terminator in front and set SESSION_COOKIE_SECURE=1, or\n"
+            "  - bind loopback with HOST=127.0.0.1, or\n"
+            "  - set UIR_ALLOW_INSECURE_BIND=1 if this network is genuinely trusted."
+        )
+    logger.warning(
+        "serving on %s over plain HTTP with UIR_ALLOW_INSECURE_BIND=1: "
+        "passwords and session cookies are readable by anyone on this network",
+        host,
+    )
+
+
+def register_worker_shutdown(app: Flask) -> None:
+    """Ask the pipeline child to stop between jobs at interpreter exit.
+
+    Entrypoints call this; ``create_app`` must not. The factory runs once per
+    test, and an atexit handler per app would accumulate unboundedly and fire
+    after pytest has closed the streams the worker logs to.
+    """
+    worker = app.config.get("PIPELINE_WORKER")
+    if worker is not None:
+        atexit.register(worker.shutdown)
+
+
 # Allow ``python -m uir_pipeline.web`` for power users.
 if __name__ == "__main__":  # pragma: no cover
-    import os
-
     logging.basicConfig(level=logging.INFO)
-    port = int(os.environ.get("PORT", "5000"))
-    create_app().run(host="127.0.0.1", port=port, debug=False, use_reloader=False)
+    _port = int(os.environ.get("PORT", "5000"))
+    _host = os.environ.get("HOST", "127.0.0.1")
+    assert_safe_bind(_host, _port)
+
+    _app = create_app()
+    register_worker_shutdown(_app)
+    _app.run(host=_host, port=_port, debug=False, use_reloader=False)
 
 
-__all__ = ["create_app"]
+__all__ = [
+    "assert_safe_bind",
+    "create_app",
+    "is_loopback_host",
+    "register_worker_shutdown",
+]

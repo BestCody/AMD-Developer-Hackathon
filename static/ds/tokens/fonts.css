@@ -1,0 +1,15 @@
+/* ==========================================================================
+   Aperture — Webfonts
+   ==========================================================================
+   Apple ships SF Pro Display / SF Pro Text, a proprietary system font not
+   licensed for web distribution. Per DESIGN-apple.md's own substitution
+   guidance, we use Inter (variable, Google Fonts) as the open equivalent —
+   weight 600 + `font-feature-settings: "ss03"` approximates SF Pro's
+   rounded "a". FLAG: if the real SF Pro webfont files become available,
+   drop them in as @font-face + local() here and remove this @import.
+   ========================================================================== */
+
+@import url("https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700;1,14..32,400&display=swap");
+
+/* Monospace for UIR/JSON views, code, technical output */
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap");

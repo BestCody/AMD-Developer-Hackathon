@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from uir_pipeline.format_router import (
     FormatRoute,
@@ -229,3 +228,42 @@ def test_supported_extensions_includes_many():
     assert ".ipynb" in SUPPORTED_EXTENSIONS
     assert ".tex" in SUPPORTED_EXTENSIONS
     assert ".py" in SUPPORTED_EXTENSIONS
+
+
+# ---------------------------------------------------------------------------
+# CONVERTIBLE_EXTENSIONS
+# ---------------------------------------------------------------------------
+# SUPPORTED_EXTENSIONS names every extension the router *recognises*, including
+# the legacy binary Office formats it classifies SKIP. Gating uploads on it
+# accepted a .doc and then failed the job seconds later inside ingest_any.
+
+def test_convertible_is_a_subset_of_supported():
+    from uir_pipeline.format_router import CONVERTIBLE_EXTENSIONS, SUPPORTED_EXTENSIONS
+
+    assert CONVERTIBLE_EXTENSIONS < SUPPORTED_EXTENSIONS
+
+
+def test_convertible_excludes_exactly_the_legacy_binary_office_formats():
+    from uir_pipeline.format_router import CONVERTIBLE_EXTENSIONS, SUPPORTED_EXTENSIONS
+
+    assert sorted(SUPPORTED_EXTENSIONS - CONVERTIBLE_EXTENSIONS) == [".doc", ".ppt", ".xls"]
+
+
+def test_no_convertible_extension_classifies_to_skip():
+    from uir_pipeline.format_router import (
+        CONVERTIBLE_EXTENSIONS,
+        FormatRoute,
+        classify_route,
+    )
+
+    for ext in CONVERTIBLE_EXTENSIONS:
+        route = classify_route(ext.lstrip(".").upper())
+        assert route is not FormatRoute.SKIP, f"{ext} -> SKIP but marked convertible"
+
+
+def test_the_headline_formats_are_convertible():
+    from uir_pipeline.format_router import CONVERTIBLE_EXTENSIONS
+
+    for ext in (".pdf", ".docx", ".pptx", ".xlsx", ".txt", ".md", ".csv",
+                ".rtf", ".py", ".ipynb", ".html", ".tex", ".png"):
+        assert ext in CONVERTIBLE_EXTENSIONS, ext

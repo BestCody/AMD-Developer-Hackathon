@@ -151,6 +151,12 @@ def describe_image(
 
     Returns a dict with keys: ``success``, ``description``, ``model``,
     ``prompt``, ``intent``, ``error``, ``usage``.
+
+    A missing ``FIREWORKS_API_KEY`` comes back as ``success=False``, like any
+    other failure. It used to raise ``ValueError`` out of ``_get_api_key``
+    while an HTTP 401 returned the error dict -- so ``run_image_pipeline``'s
+    single ``if not result["success"]`` branch caught one and not the other.
+    Same fail-soft contract as :func:`uir_pipeline.chat.answer`.
     """
     png_b64 = load_image_as_b64_png(image_path)
 
@@ -165,7 +171,18 @@ def describe_image(
         text_prompt = _DETAILED_DESCRIPTION_PROMPT
 
     resolved_model = model or _get_vision_model()
-    api_key = _get_api_key()
+    try:
+        api_key = _get_api_key()
+    except ValueError as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "description": "",
+            "model": resolved_model,
+            "prompt": text_prompt,
+            "intent": intent,
+            "usage": {},
+        }
     base_url = _get_base_url()
 
     request_body = {

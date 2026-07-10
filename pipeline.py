@@ -100,17 +100,22 @@ def main(argv: list[str] | None = None) -> int:
 
     # Resolve inputs across all supported formats (PLAN §17 §Multi-format).
     # Single-file mode passes through dispatch directly; directory mode
-    # rglobs the SUPPORTED_EXTENSIONS set so a heterogeneous corpus
+    # rglobs the convertible extensions so a heterogeneous corpus
     # (e.g. ``data/inputs/paper.pdf`` + ``notes.md``) is handled in one
     # invocation. Discovery summary is logged once before the loop so
     # unknown extensions surface as ``skipping`` lines.
-    from uir_pipeline.format_router import SUPPORTED_EXTENSIONS, route as _route
+    #
+    # CONVERTIBLE_EXTENSIONS, not SUPPORTED_EXTENSIONS: the latter also names
+    # the legacy binary Office formats (.doc/.ppt/.xls), which the router
+    # recognises but classifies SKIP. Sweeping them in queues work that can
+    # only fail.
+    from uir_pipeline.format_router import CONVERTIBLE_EXTENSIONS, route as _route
     targets: list[Path] = []
     if args.input.is_file():
         targets = [args.input]
     elif args.input.is_dir():
         seen: set[Path] = set()
-        for ext in sorted(SUPPORTED_EXTENSIONS):
+        for ext in sorted(CONVERTIBLE_EXTENSIONS):
             for p in args.input.rglob(f"*{ext}"):
                 if p.is_file() and p not in seen:
                     seen.add(p)

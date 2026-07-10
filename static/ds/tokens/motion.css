@@ -1,0 +1,15 @@
+/* ==========================================================================
+   Aperture — Motion tokens
+   The Apple source documents exactly one micro-interaction: a 0.95 press
+   scale, plus width/opacity transitions with no elastic easing. No page
+   animation, no elastic bounce, no spinner beyond a linear progress fill.
+   ========================================================================== */
+
+:root {
+  --ease-standard: cubic-bezier(0.22, 0.61, 0.36, 1); /* @kind other */
+  --duration-press: 0.08s; /* @kind other */
+  --duration-fast: 0.15s; /* @kind other */
+  --duration-standard: 0.4s; /* @kind other */
+
+  --scale-press: 0.95; /* @kind other */
+}

@@ -137,7 +137,9 @@ def _cooccurrence_relationships(
         for b in entities_in_chunk[i + 1:]:
             if a.text == b.text:
                 continue
-            key = tuple(sorted((a.text, b.text)))
+            # An explicit 2-tuple: `tuple(sorted(...))` widens to
+            # `tuple[str, ...]`, which is not `seen`'s element type.
+            key = (a.text, b.text) if a.text < b.text else (b.text, a.text)
             if key in seen:
                 continue
             seen.add(key)

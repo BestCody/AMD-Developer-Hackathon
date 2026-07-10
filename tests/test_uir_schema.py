@@ -22,16 +22,8 @@ import pytest
 from pydantic import ValidationError
 
 from uir_pipeline.uir_schema import (
-    BoundingBox,
     ChunkNode,
-    Entity,
-    Metadata,
-    Provenance,
     Relationship,
-    Semantics,
-    Source,
-    Structure,
-    StructureNode,
     UIRV1,
     _validate_bbox,
     schema_json_dict,

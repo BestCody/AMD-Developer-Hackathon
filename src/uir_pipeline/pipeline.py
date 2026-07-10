@@ -28,6 +28,7 @@ import logging
 import os
 import re
 import time
+import dataclasses
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -140,6 +141,252 @@ def _resolve_fast_path(fast_path: str | None) -> str:
     return raw
 
 
+class ImageAnalysisError(RuntimeError):
+    """The IMAGE route could not describe the image.
+
+    `run_image_pipeline` reports failure in `ImagePipelineResult.error` rather
+    than raising, so the orchestrator has to translate. Without this the caller
+    saw a well-formed result whose `out_path` pointed at a file that was never
+    written.
+    """
+
+
+class _NoFigureSource(Exception):
+    """The chosen route produced no figure regions to caption.
+
+    Not an error: PPTX_NATIVE never runs Docling, so there is no
+    ``DoclingResult`` carrying figure bboxes. Signalled as an exception only
+    so the caption stage's existing fail-soft structure can skip it without
+    logging a failure.
+    """
+
+
+def _page_texts_from_regions(regions: list[Any]) -> list[tuple[int, str]]:
+    """Collapse regions into ``[(page, joined_text), ...]``, page-ordered.
+
+    The Docling route gets this from ``dr.page_texts``; routes that build
+    regions themselves still owe the chunker the same page-level view.
+    """
+    by_page: dict[int, list[str]] = {}
+    for r in regions:
+        by_page.setdefault(int(r.page), []).append(r.text)
+    return [(page, "\n".join(texts)) for page, texts in sorted(by_page.items())]
+
+
+def _read_text_file(path: Path) -> str:
+    """Read a text file without ever raising on encoding.
+
+    A stray 0x80 byte in a source file must not fail the whole document, so
+    undecodable bytes become U+FFFD rather than a UnicodeDecodeError. UTF-8
+    first because everything modern is; latin-1 never fails but silently
+    mojibakes, so it is not a fallback worth having.
+    """
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _split_paragraphs(text: str) -> list[str]:
+    """Split on blank lines, but never inside a ``` fenced block.
+
+    A markdown or notebook code block routinely contains blank lines. A naive
+    ``re.split(r"\\n\\s*\\n", ...)`` tears it in half, leaving an unterminated
+    fence in one chunk and an orphan ``` in the next.
+    """
+    paragraphs: list[str] = []
+    current: list[str] = []
+    in_fence = False
+
+    def _flush() -> None:
+        block = "\n".join(current).strip()
+        if block:
+            paragraphs.append(block)
+        current.clear()
+
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            current.append(line)
+            if not in_fence:  # closing fence ends the block
+                _flush()
+            continue
+        if not in_fence and not line.strip():
+            _flush()
+            continue
+        current.append(line)
+    _flush()
+    return paragraphs
+
+
+def _notebook_to_text(path: Path) -> str:
+    """Flatten a Jupyter notebook into prose + fenced code.
+
+    Docling's allow-list carries no notebook format, so `.ipynb` used to fail
+    with "File format not allowed". It is JSON, but dumping the JSON would bury
+    the prose under `"cell_type"` / `"metadata"` noise and embed base64 image
+    outputs in the embeddings.
+
+    Markdown cells pass through as-is. Code cells become fenced blocks so the
+    chunker keeps them whole. Outputs are dropped: they are often megabytes of
+    base64 PNG, and an execution result is not part of the document's meaning.
+    """
+    try:
+        nb = json.loads(_read_text_file(path))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{path.name} is not valid notebook JSON: {exc}") from exc
+
+    lang = (
+        (nb.get("metadata") or {}).get("kernelspec", {}).get("language")
+        or "python"
+    )
+    blocks: list[str] = []
+    for cell in nb.get("cells") or []:
+        source = cell.get("source") or []
+        # nbformat stores source as a list of lines *or* a single string.
+        text = ("".join(source) if isinstance(source, list) else str(source)).strip()
+        if not text:
+            continue
+        kind = cell.get("cell_type")
+        if kind == "markdown":
+            blocks.append(text)
+        elif kind == "code":
+            blocks.append(f"```{lang}\n{text}\n```")
+        # raw cells carry no rendering semantics; keep their text verbatim.
+        elif kind == "raw":
+            blocks.append(text)
+    return "\n\n".join(blocks)
+
+
+def _run_text_route(path: Path, fmt: str) -> tuple[list[Any], list[tuple[int, str]]]:
+    """The pageless route: read -> paginate -> regions. No Docling.
+
+    ``format_router`` sends TXT / MD / CSV / RTF / source code here. Docling
+    cannot open most of them -- `.rtf` and `.py` fail its allow-list outright
+    ("File format not allowed") -- and they have no page geometry to recover,
+    so a layout model has nothing to contribute.
+
+    Pages are synthesized by :func:`chunk.paginate_pageless` at ~2000 BGE
+    tokens each, matching the PDF contract of 1-based page numbers. Within a
+    page, blank-line-separated paragraphs become regions so the chunker sees
+    real paragraph boundaries instead of one undifferentiated blob.
+
+    Bounding boxes are the full canvas: a text file has no geometry, and
+    claiming a narrower box would be inventing provenance.
+    """
+    from uir_pipeline.chunk import paginate_pageless
+    from uir_pipeline.layout import LayoutLabel, LayoutRegion
+
+    fmt_upper = fmt.upper()
+    if fmt_upper == "RTF":
+        # striprtf decodes the control words; it also paginates for us.
+        from uir_pipeline.ingest_rtf import ingest_rtf
+
+        _doc, page_pairs = ingest_rtf(path)
+    elif fmt_upper == "IPYNB":
+        page_pairs = paginate_pageless(_notebook_to_text(path))
+    else:
+        page_pairs = paginate_pageless(_read_text_file(path))
+
+    # Markdown (and notebook markdown cells) declare headings with `#`. Docling
+    # used to label them for us; on this lane nothing would, and the chunker's
+    # section-path tracking only recognises numbered headings.
+    markdownish = fmt_upper in ("MD", "MARKDOWN", "IPYNB")
+
+    regions: list[Any] = []
+    order = 0
+    for page_no, page_text in page_pairs:
+        for para in _split_paragraphs(page_text):
+            order += 1
+            is_heading = (
+                markdownish
+                and para.startswith("#")
+                and not para.startswith("#!")  # a shebang is not a heading
+                and "\n" not in para           # a heading is one line
+            )
+            regions.append(LayoutRegion(
+                label=LayoutLabel.HEADING if is_heading else LayoutLabel.PARAGRAPH,
+                text=para,
+                # Read verbatim off disk; nothing was inferred, so nothing is
+                # uncertain.
+                confidence=1.0,
+                bbox=(0, 0, 1000, 1000),
+                page=int(page_no),
+                reading_order=order,
+            ))
+    return regions, list(page_pairs)
+
+
+def _extract_pptx_route(path: Path) -> list[Any]:
+    """Walk a ``.pptx`` with python-pptx and return :class:`LayoutRegion` list.
+
+    Referenced by ``format_router.classify_route``, which sends PPTX here
+    rather than to Docling: Docling's layout model runs on rendered page
+    images, and a python-pptx-generated deck has no rendering, so it returns
+    zero regions. A slide is already structured -- title placeholder, then
+    body placeholders -- so a native walk beats a layout model that has
+    nothing to look at.
+
+    One slide == one page. Shapes carry EMU offsets, not a 0-1000 canvas,
+    so bboxes are scaled against the presentation's own slide dimensions
+    rather than assumed to be letter-sized.
+    """
+    from pptx import Presentation
+    from pptx.util import Emu
+
+    from uir_pipeline.layout import LayoutLabel, LayoutRegion
+
+    prs = Presentation(str(path))
+    slide_w = int(prs.slide_width or Emu(9144000))
+    slide_h = int(prs.slide_height or Emu(6858000))
+
+    def _canvas(shape: Any) -> tuple[int, int, int, int]:
+        try:
+            left, top = int(shape.left or 0), int(shape.top or 0)
+            width, height = int(shape.width or 0), int(shape.height or 0)
+        except (TypeError, ValueError):
+            return (0, 0, 0, 0)
+        x1 = max(0, min(1000, round(left * 1000 / slide_w)))
+        y1 = max(0, min(1000, round(top * 1000 / slide_h)))
+        x2 = max(0, min(1000, round((left + width) * 1000 / slide_w)))
+        y2 = max(0, min(1000, round((top + height) * 1000 / slide_h)))
+        # ChunkNode's validator requires x1 <= x2 and y1 <= y2.
+        if x1 > x2:
+            x1, x2 = x2, x1
+        if y1 > y2:
+            y1, y2 = y2, y1
+        return (x1, y1, x2, y2)
+
+    regions: list[Any] = []
+    order = 0
+    for page_no, slide in enumerate(prs.slides, start=1):
+        # `slide.shapes.title` builds a fresh proxy on every access, so
+        # `shape is slide.shapes.title` is always False. `shape_id` is the
+        # stable identity.
+        title_id = None
+        try:
+            title = slide.shapes.title
+            title_id = title.shape_id if title is not None else None
+        except (AttributeError, ValueError):
+            pass
+        for shape in slide.shapes:
+            if not getattr(shape, "has_text_frame", False):
+                continue
+            text = (shape.text_frame.text or "").strip()
+            if not text:
+                continue
+            order += 1
+            is_title = title_id is not None and shape.shape_id == title_id
+            regions.append(LayoutRegion(
+                label=LayoutLabel.HEADING if is_title else LayoutLabel.PARAGRAPH,
+                text=text,
+                # A placeholder's role is declared in the file, not inferred
+                # by a model, so there is nothing to be uncertain about.
+                confidence=1.0,
+                bbox=_canvas(shape),
+                page=page_no,
+                reading_order=order,
+            ))
+    return regions
+
+
 def _docling_to_table_draft(t: dict[str, Any]) -> Any:
     """Synthesize a :class:`TableDraft` from a docling tables[].dict.
 
@@ -168,6 +415,32 @@ def _docling_to_table_draft(t: dict[str, Any]) -> Any:
         col_count=col_count,
         confidence=0.9,
     )
+
+
+def _is_weaviate_unavailable(exc: BaseException) -> bool:
+    """True iff ``exc`` means "no Weaviate server here", not "our code is wrong".
+
+    Used to decide whether the optional upsert stage may fail soft. Only
+    transport/startup conditions qualify. A schema mismatch or a rejected
+    object is a defect and must propagate.
+    """
+    if isinstance(exc, ImportError):  # weaviate-client not installed
+        return True
+    try:
+        from weaviate.exceptions import (
+            WeaviateConnectionError,
+            WeaviateGRPCUnavailableError,
+            WeaviateStartUpError,
+            WeaviateTimeoutError,
+        )
+    except ImportError:  # pragma: no cover -- client absent entirely
+        return True
+    return isinstance(exc, (
+        WeaviateConnectionError,
+        WeaviateGRPCUnavailableError,
+        WeaviateStartUpError,
+        WeaviateTimeoutError,
+    ))
 
 
 # ----------------------------------------------------------------------------
@@ -216,7 +489,7 @@ def run(
         A :class:`PipelineResult` with :attr:`PipelineResult.umr_path`
         populated (the companion ``.umr.md`` file is always written
         alongside ``.uir.json`` so agents have the same view that
-        :file:`templates/index.html` surfaces).
+        :file:`templates/console.html` surfaces).
     """
     t0 = time.monotonic()
     p = Path(input_path)
@@ -237,21 +510,28 @@ def run(
             dry_run=dry_run,
             on_progress=on_progress,
         )
+        if img_result.error:
+            # `run_image_pipeline` reports failure in a field, not an
+            # exception. Folding that into `chunk_count=0` and returning a
+            # success-shaped result made the CLI log
+            # "done chart.png: chunks=0 -> <path>" and exit 0 while writing no
+            # file at all, and made the web job report `done` with a `result`
+            # that 404s. Raise instead: the caller already turns this into a
+            # failed job (web) or a non-zero exit (CLI).
+            raise ImageAnalysisError(img_result.error)
         # Synthesise a PipelineResult from the ImagePipelineResult so the
         # calling CLI/web layer receives the same shape it expects.
         return PipelineResult(
             uir_id=img_result.uir_id,
             out_path=img_result.out_path,
             umr_path=img_result.umr_path,
-            chunk_count=1 if not img_result.error else 0,
+            chunk_count=1,
             entity_count=0,
             elapsed_seconds=img_result.elapsed_seconds,
         )
 
     from uir_pipeline.chunk import chunk_text
     from uir_pipeline.embed import (
-        COLLECTION_CHUNKS,
-        COLLECTION_PARENT_DOCS,
         derive_doc_id,
         embed_texts,
         ensure_collections,
@@ -260,7 +540,7 @@ def run(
         upsert_parent_doc,
     )
     from uir_pipeline.enrich import EnrichmentResult, enrich_chunks
-    from uir_pipeline.ingest import DocumentInput, ingest
+    from uir_pipeline.ingest import DocumentInput, ingest, ingest_any
     from uir_pipeline.logging_config import (
         attach_doc_log,
         configure,
@@ -270,18 +550,15 @@ def run(
         ChunkNode,
         Entity,
         ExtractionProvenance,
-        Metadata,
         NormalizationProvenance,
         Provenance,
         Relationship,
         Semantics,
-        Source,
         Structure,
         StructureNode,
         UIRV1,
     )
     from uir_pipeline.utils import (
-        bbox_from_pixel,
         deterministic_node_id,
         strip_uir_prefix,
     )
@@ -305,7 +582,10 @@ def run(
             except Exception:
                 pass
     _progress("ingest", 5)
-    doc: DocumentInput = ingest(p)
+    # `ingest` is the PDF ingress: it asserts %PDF- magic and reads page count
+    # with pypdf. Neither applies to OOXML, so non-PDF routes take the generic
+    # ingress. `froute` was already resolved above for the IMAGE check.
+    doc: DocumentInput = ingest(p) if froute is FormatRoute.PDF else ingest_any(p)
     doc_id = derive_doc_id(doc.uri)
     log_dir = output_dir.parent / "logs" if output_dir.name != "logs" else output_dir
     log_handler = attach_doc_log(strip_uir_prefix(doc_id), log_dir)
@@ -340,28 +620,60 @@ def run(
         # real cause (missing dep OR HF model load failure).
         _progress("docling_extract", 18)
         from uir_pipeline.docling_extract import (
-            DoclingUnavailable,
             extract_with_docling,
         )
         from uir_pipeline.layout import LayoutLabel, LayoutRegion
-        dr = extract_with_docling(p)
-        docling_result = dr  # forwarded to figure-caption stage
-        all_regions = [
-            LayoutRegion(
-                label=LayoutLabel(r["label"]),
-                text=r["text"],
-                confidence=0.9,
-                bbox=tuple(r["bbox"]),
-                page=int(r["page"]),
-                reading_order=i + 1,
+
+        docling_result = None
+        if froute is FormatRoute.PPTX_NATIVE:
+            # Docling's layout model reads rendered page images; a
+            # python-pptx deck has no rendering, so it returns 0 regions.
+            all_regions = _extract_pptx_route(p)
+            page_text_pairs = _page_texts_from_regions(all_regions)
+        elif froute is FormatRoute.TEXT:
+            # Pageless: docling's allow-list rejects .rtf and source code
+            # outright, and plain text has no layout to recover.
+            all_regions, page_text_pairs = _run_text_route(p, doc.format)
+        else:
+            # PDF and the DOCLING route (DOCX / XLSX / EPUB / HTML / ...):
+            # DocumentConverter accepts all of them natively.
+            dr = extract_with_docling(p)
+            docling_result = dr  # forwarded to figure-caption stage
+            all_regions = [
+                LayoutRegion(
+                    label=LayoutLabel(r["label"]),
+                    text=r["text"],
+                    confidence=0.9,
+                    bbox=tuple(r["bbox"]),
+                    page=int(r["page"]),
+                    reading_order=i + 1,
+                )
+                for i, r in enumerate(dr.regions)
+            ]
+            table_drafts = [_docling_to_table_draft(t) for t in dr.tables]
+            page_text_pairs = list(dr.page_texts)
+
+        # Record the lane that actually ran. `ingest_any` copied the router's
+        # classification, which is a *request*, not a result -- a .txt was
+        # landing in the UIR as `route="text"` while docling did the work.
+        # `page_count` is 0 out of `ingest_any` (OOXML has none until laid
+        # out); the pageless routes synthesize pages, so report those.
+        _actual_route = (
+            "pdf" if froute is FormatRoute.PDF
+            else "pptx" if froute is FormatRoute.PPTX_NATIVE
+            else "text" if froute is FormatRoute.TEXT
+            else "docling"
+        )
+        if doc.route != _actual_route or (doc.page_count == 0 and page_text_pairs):
+            doc = dataclasses.replace(
+                doc,
+                route=_actual_route,
+                page_count=doc.page_count or len(page_text_pairs),
             )
-            for i, r in enumerate(dr.regions)
-        ]
-        table_drafts = [_docling_to_table_draft(t) for t in dr.tables]
-        page_text_pairs = list(dr.page_texts)
+
         _progress(
             "layout", 45,
-            fast_path="docling",
+            fast_path=_actual_route,
             region_count=len(all_regions),
             table_count=len(table_drafts),
         )
@@ -380,11 +692,24 @@ def run(
         caption_records_total = 0
         caption_records_with_text = 0
         try:
+            if docling_result is None:
+                # PPTX_NATIVE never runs Docling, so there are no figure
+                # bboxes to caption. Skip rather than convert a second time.
+                raise _NoFigureSource
             from uir_pipeline.caption import caption_figures_in_pdf
             from uir_pipeline.utils import count_tokens as _bpe_count_tokens
             # Forward the same DoclingResult so caption uses figure bboxes
-            # from dr.pictures (no pdfplumber path).
+            # from dr.pictures (no pdfplumber path) -- and the source path so
+            # it can render the crops. Without `pdf_path` the renderer is
+            # skipped entirely and every `image_b64` comes back None; passing
+            # both reuses the conversion rather than re-running Docling.
+            #
+            # Crop rendering goes through PyMuPDF, which opens PDFs. On the
+            # DOCLING route (DOCX/XLSX) the bboxes are real but the source is
+            # not a PDF, so pass no path: captions still come back, `image_b64`
+            # is None, and PyMuPDF is never handed a file it cannot open.
             figure_records = caption_figures_in_pdf(
+                p if froute is FormatRoute.PDF else None,
                 docling_result=docling_result,
                 page_numbers=page_numbers,
             )
@@ -422,6 +747,14 @@ def run(
                         },
                     },
                 ))
+        except _NoFigureSource:
+            # Not a failure: this route produced no figure bboxes to caption.
+            # Distinct from the handler below so it never logs as an error.
+            _progress(
+                "figure_caption", 60,
+                caption_records_total=0, caption_records_with_text=0,
+                caption_records_empty=0, skipped="route has no figure source",
+            )
         except Exception as exc:
             logger.warning("figure caption stage failed (fail-soft): %s", exc)
             _progress(
@@ -724,7 +1057,11 @@ def run(
         if not dry_run:
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path = out_dir / f"{doc_id}.uir.json"
-            out_path.write_text(uir.model_dump_json(indent=2))
+            # encoding= is mandatory: Path.write_text() defaults to the
+            # locale encoding, which is cp1252 on Windows. Any non-latin1
+            # glyph in an extracted document (curly quotes, CJK, "·") then
+            # either mangles or raises UnicodeEncodeError.
+            out_path.write_text(uir.model_dump_json(indent=2), encoding="utf-8")
         else:
             out_path = out_dir / f"{doc_id}.uir.json"  # virtual
         # UMR is rendered from the in-memory UIRV1 (not the just-written
@@ -740,7 +1077,7 @@ def run(
             # model) so the renderer can be unit-tested independently.
             umr_text = build_umr(json.loads(uir.model_dump_json()))
             if not dry_run:
-                umr_path.write_text(umr_text)
+                umr_path.write_text(umr_text, encoding="utf-8")
         except Exception as exc:
             # UMR rendering is best-effort: if it fails we log and emit a
             # minimal placeholder so downstream consumers can still
@@ -749,11 +1086,13 @@ def run(
             logger.warning("UMR render failed (fail-soft): %s", exc)
             if not dry_run:
                 umr_path.write_text(
-                    f"# UMR render failed\n\n_Exception:_ `{exc}`\n"
+                    f"# UMR render failed\n\n_Exception:_ `{exc}`\n",
+                    encoding="utf-8",
                 )
 
         # Stage 11: optional Weaviate upsert
         if not skip_weaviate and not dry_run and vectors is not None and all_chunks:
+            client = None
             try:
                 from uir_pipeline.weaviate_store import get_client
                 client = get_client()
@@ -774,7 +1113,22 @@ def run(
                 )
                 logger.info("weaviate upsert: %d chunks + 1 doc", len(chunk_nodes))
             except Exception as exc:
-                logger.warning("weaviate upsert failed: %s", exc)
+                # Fail-soft ONLY when the server isn't there: the CLI defaults
+                # to skip_weaviate=False, so a dev without `docker compose up`
+                # must still get their UIR JSON. Anything else -- a schema
+                # mismatch, a rejected object, a client-API break -- is a bug
+                # in us, and swallowing it silently loses the entire index.
+                if _is_weaviate_unavailable(exc):
+                    logger.warning("weaviate upsert skipped (server unavailable): %s", exc)
+                else:
+                    logger.error("weaviate upsert failed", exc_info=True)
+                    raise
+            finally:
+                if client is not None:
+                    try:
+                        client.close()
+                    except Exception:  # pragma: no cover -- best-effort cleanup
+                        pass
 
         _progress("done", 100)
         elapsed = time.monotonic() - t0

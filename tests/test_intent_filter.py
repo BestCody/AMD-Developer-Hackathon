@@ -264,7 +264,7 @@ def test_match_response_has_neighbors_and_section_path(tmp_path: Path, monkeypat
                              preceding=prev, following=nxt))
     uir = _doc_envelope(chunks)
     path = _write_uir(tmp_path, "t.uir.json", uir)
-    res = filter_uirstream_by_intent(path, "lithium")
+    filter_uirstream_by_intent(path, "lithium")  # writes the .intent.uir.json
     out = json.loads(path.with_name(path.stem + ".intent" + path.suffix).read_text())
     meta = out["structure"]["root"]["intent_filter"]
     match = meta["matches"][0]
@@ -299,7 +299,7 @@ def test_topics_used_for_widening(tmp_path: Path, monkeypatch):
     path = _write_uir(tmp_path, "t.uir.json", uir)
     res = filter_uirstream_by_intent(path, "lithium")
     out = json.loads(path.with_name(path.stem + ".intent" + path.suffix).read_text())
-    meta = out["structure"]["root"]["intent_filter"]
+    assert "intent_filter" in out["structure"]["root"]
     # topics_hit should capture keywords overlapping with topics
     assert any("lithium" in kw for kw in res["topics_hit"])
 
@@ -574,7 +574,7 @@ def test_filter_uirstream_str_output_path(tmp_path: Path, monkeypatch):
     uir = _doc_envelope([obs])
     path = _write_uir(tmp_path, "t.uir.json", uir)
     explicit_out = tmp_path / "custom_intent.uir.json"
-    res = filter_uirstream_by_intent(
+    filter_uirstream_by_intent(
         path.as_posix(),
         "lithium",
         out_path=explicit_out.as_posix(),  # str out_path

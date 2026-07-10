@@ -1,0 +1,105 @@
+/* ==========================================================================
+   Aperture — Typography tokens
+   Mirrors DESIGN-apple.md's scale exactly (sizes, weights, line-heights,
+   tracking) with Inter standing in for SF Pro Display / SF Pro Text.
+   Ladder is 300 / 400 / 600 / 700 — weight 500 is deliberately absent.
+   ========================================================================== */
+
+:root {
+  --font-display: "Inter", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-text: "Inter", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* Inter runs slightly wider than SF Pro — nudge tracking tighter and
+     line-height shorter per DESIGN-apple.md's substitution guidance. */
+  --display-feature: "ss03" 1; /* @kind other */
+
+  /* ---- Display / headline sizes ---------------------------------------- */
+  --text-hero-size: 56px;
+  --text-hero-weight: 600;
+  --text-hero-leading: 1.07;
+  --text-hero-tracking: -0.28px;
+
+  --text-display-lg-size: 40px;
+  --text-display-lg-weight: 600;
+  --text-display-lg-leading: 1.10;
+  --text-display-lg-tracking: 0px;
+
+  --text-display-md-size: 34px;
+  --text-display-md-weight: 600;
+  --text-display-md-leading: 1.44; /* 1.47 - 0.03 Inter x-height adjustment */
+  --text-display-md-tracking: -0.374px;
+
+  --text-lead-size: 28px;
+  --text-lead-weight: 400;
+  --text-lead-leading: 1.14;
+  --text-lead-tracking: 0.2px;
+
+  --text-lead-airy-size: 24px;
+  --text-lead-airy-weight: 300;
+  --text-lead-airy-leading: 1.5;
+  --text-lead-airy-tracking: 0;
+
+  --text-tagline-size: 21px;
+  --text-tagline-weight: 600;
+  --text-tagline-leading: 1.19;
+  --text-tagline-tracking: 0.23px;
+
+  --text-body-strong-size: 17px;
+  --text-body-strong-weight: 600;
+  --text-body-strong-leading: 1.24;
+  --text-body-strong-tracking: -0.384px;
+
+  --text-body-size: 17px;
+  --text-body-weight: 400;
+  --text-body-leading: 1.44; /* Inter x-height adjustment from 1.47 */
+  --text-body-tracking: -0.384px;
+
+  --text-dense-link-size: 17px;
+  --text-dense-link-weight: 400;
+  --text-dense-link-leading: 2.41;
+  --text-dense-link-tracking: 0;
+
+  --text-caption-size: 14px;
+  --text-caption-weight: 400;
+  --text-caption-leading: 1.43;
+  --text-caption-tracking: -0.23px;
+
+  --text-caption-strong-size: 14px;
+  --text-caption-strong-weight: 600;
+  --text-caption-strong-leading: 1.29;
+  --text-caption-strong-tracking: -0.23px;
+
+  --text-button-large-size: 18px;
+  --text-button-large-weight: 300;
+  --text-button-large-leading: 1.0;
+  --text-button-large-tracking: 0;
+
+  --text-button-utility-size: 14px;
+  --text-button-utility-weight: 400;
+  --text-button-utility-leading: 1.29;
+  --text-button-utility-tracking: -0.23px;
+
+  --text-fine-print-size: 12px;
+  --text-fine-print-weight: 400;
+  --text-fine-print-leading: 1.0;
+  --text-fine-print-tracking: -0.12px;
+
+  --text-micro-legal-size: 10px;
+  --text-micro-legal-weight: 400;
+  --text-micro-legal-leading: 1.3;
+  --text-micro-legal-tracking: -0.08px;
+
+  --text-nav-link-size: 12px;
+  --text-nav-link-weight: 400;
+  --text-nav-link-leading: 1.0;
+  --text-nav-link-tracking: -0.12px;
+
+  /* ---- Aperture addition: mono technical readout (UIR/JSON, chunk IDs).
+     Not present in the Apple source — needed for the product's own
+     data-viewer surfaces. ------------------------------------------------ */
+  --text-mono-size: 13px;
+  --text-mono-weight: 400;
+  --text-mono-leading: 1.55;
+  --text-mono-tracking: 0;
+}

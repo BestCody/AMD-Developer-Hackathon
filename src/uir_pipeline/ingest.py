@@ -16,6 +16,7 @@ pypdf 6.x auto-parses PDF dates (``D:YYYYMMDDhhmmssZ``) into
 from __future__ import annotations
 
 import hashlib
+import mimetypes
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -246,6 +247,89 @@ def ingest(path: str | Path) -> DocumentInput:
         )
 
 
+#: MIME types for the formats the non-PDF routes accept. Used only to populate
+#: ``Source.mime_type`` -- dispatch is by magic bytes, in
+#: ``format_router.detect_format``, never by extension alone.
+#:
+#: Pinned rather than left to ``mimetypes.guess_type``, which on Windows reads
+#: the registry: there ``.csv`` answers ``application/vnd.ms-excel`` and
+#: ``.rtf`` answers ``application/msword``. The same document would then carry
+#: a different ``Source.mime_type`` depending on the machine that converted it.
+_MIME_BY_FORMAT: Final[dict[str, str]] = {
+    "PDF": PDF_MIME_TYPE,
+    "DOCX": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "PPTX": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "XLSX": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "EPUB": "application/epub+zip",
+    "HTML": "text/html",
+    "TEX": "application/x-tex",
+    "IPYNB": "application/x-ipynb+json",
+    # Pageless / text route.
+    "TXT": "text/plain",
+    "MD": "text/markdown",
+    "MARKDOWN": "text/markdown",
+    "CSV": "text/csv",
+    "TSV": "text/tab-separated-values",
+    "RTF": "application/rtf",
+}
+
+
+def ingest_any(path: str | Path) -> DocumentInput:
+    """Ingress for every non-PDF format the orchestrator can extract.
+
+    :func:`ingest` asserts ``%PDF-`` magic bytes and reads page count and
+    document properties with ``pypdf``. Neither applies to a DOCX or an XLSX,
+    so this is a sibling rather than a widening of that function -- callers
+    that mean "this must be a PDF" keep getting that guarantee.
+
+    ``page_count`` is 0: OOXML has no page count until it is laid out, and a
+    spreadsheet has none at all. Guessing 1 would put a wrong number in
+    ``Metadata.page_count``; 0 reads as "not applicable". The extractor
+    assigns real page numbers to the regions it emits.
+
+    ``title`` comes from the filename. Docling can read OOXML core properties,
+    but only after conversion, and ``Source``/``Metadata`` are built before
+    that -- so a real title would mean converting twice.
+
+    Raises:
+        FileNotFoundError: ``path`` does not exist (or is not a regular file).
+        ValueError: the format is unrecognised or explicitly unsupported.
+    """
+    from uir_pipeline.format_router import FormatRoute, route as _route
+
+    p = Path(path).expanduser()
+    if not p.is_file():
+        raise FileNotFoundError(f"{p} is not a regular file")
+
+    fmt, froute = _route(p)
+    if froute is FormatRoute.SKIP or not fmt:
+        raise ValueError(
+            f"{p.name}: unsupported format {fmt or 'UNKNOWN'!r}. "
+            "Supported: PDF, DOCX, PPTX, XLSX, EPUB, HTML, TEX, IPYNB, images."
+        )
+
+    stat = p.stat()
+    # Fall back to the stdlib's extension table before giving up: it knows
+    # text/plain, text/markdown, text/csv and the code extensions, which the
+    # explicit map above deliberately does not enumerate.
+    mime = _MIME_BY_FORMAT.get(fmt.upper()) or mimetypes.guess_type(p.name)[0]
+    return DocumentInput(
+        source_path=p,
+        uri=p.resolve().as_uri(),
+        mime_type=mime or "application/octet-stream",
+        size_bytes=stat.st_size,
+        sha256=compute_sha256(p),
+        timestamp=datetime.now(timezone.utc),
+        title=p.stem,
+        author=None,
+        created=None,
+        modified=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc),
+        page_count=0,
+        format=fmt.upper(),
+        route=froute.value,
+    )
+
+
 __all__ = [
     "DocumentInput",
     "PDF_MAGIC",
@@ -254,4 +338,5 @@ __all__ = [
     "detect_pdf_magic_bytes",
     "extract_pdf_metadata",
     "ingest",
+    "ingest_any",
 ]

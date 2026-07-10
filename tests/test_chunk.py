@@ -7,7 +7,6 @@ stitching happens, and short-text fast paths.
 """
 from __future__ import annotations
 
-import pytest
 
 from uir_pipeline.chunk import (
     ChunkDraft,

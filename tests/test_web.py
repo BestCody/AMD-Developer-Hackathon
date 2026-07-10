@@ -8,7 +8,6 @@ tests don't pull in BGE / spaCy / pdfplumber. Integration with the real
 from __future__ import annotations
 
 import json
-import threading
 import time
 from pathlib import Path
 
@@ -18,7 +17,6 @@ from uir_pipeline import pipeline as pipeline_mod
 from uir_pipeline.web import (
     JOB_DONE,
     JOB_ERROR,
-    JOB_RUNNING,
     create_app,
 )
 
@@ -118,13 +116,35 @@ def fake_run(monkeypatch):
 
 
 @pytest.fixture()
-def client(tmp_path, fake_run):
+def client(tmp_path, fake_run, monkeypatch):
+    """A *signed-in* test client.
+
+    Every job route now requires a session (see ``uir_pipeline.auth``), so
+    the fixture registers a throwaway account and returns the client holding
+    its cookie. The tests below exercise pipeline behaviour, not the auth
+    boundary -- that lives in ``tests/test_web_auth.py``.
+
+    ``data_dir`` is pinned to ``tmp_path`` so the SQLite user table and the
+    generated ``.secret_key`` never land in the real repo's ``data/``.
+    """
+    monkeypatch.setenv("SECRET_KEY", "test-secret-not-random")
     app = create_app(
         upload_dir=tmp_path / "uploads",
         output_dir=tmp_path / "outputs",
+        data_dir=tmp_path / "data",
+        # in-process: these tests monkeypatch pipeline.run, which a spawned
+        # child process cannot inherit. Crash isolation is covered in
+        # tests/test_web_isolation.py.
+        execution="thread",
     )
     app.config["TESTING"] = True
-    return app.test_client()
+    c = app.test_client()
+    resp = c.post(
+        "/api/auth/signup",
+        json={"email": "tester@example.com", "password": "test-password-123", "name": "Tester"},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    return c
 
 
 # ----------------------------------------------------------------------------
@@ -138,10 +158,11 @@ def test_health(client):
 
 
 def test_index_renders(client):
+    """``/`` now serves the MonadLabs console SPA, not the old tester page."""
     resp = client.get("/")
     assert resp.status_code == 200
-    assert b"UIR Pipeline" in resp.data
-    assert b"Run pipeline" in resp.data
+    assert b"MonadLabs Console" in resp.data
+    assert b"console/app.jsx" in resp.data
 
 
 def test_run_rejects_missing_file(client):
@@ -219,7 +240,8 @@ def test_run_full_lifecycle(client, fake_run, sample_pdf):
     while time.monotonic() < deadline:
         s = client.get(f"/api/status/{job_id}").get_json()
         if s["status"] in (JOB_DONE, JOB_ERROR):
-            final = s; break
+            final = s
+            break
         time.sleep(0.05)
     assert final is not None, "job did not complete within timeout"
     assert final["status"] == JOB_DONE
@@ -327,50 +349,100 @@ def test_list_lan_urls_empty_when_nothing_discoverable(monkeypatch):
     assert web_launcher.list_lan_urls(8080) == []
 
 
-def test_launcher_default_host_is_lan_visible(monkeypatch):
-    """main() binds 0.0.0.0 by default (LAN-visible) unless HOST overrides."""
-    import web as web_launcher
-    import uir_pipeline.web as upipe_web
+class _FakeApp:
+    """Stands in for the Flask app; `config` is read by register_worker_shutdown."""
 
-    captured: dict = {}
+    def __init__(self):
+        self.config: dict = {"PIPELINE_WORKER": None}
+        self.captured: dict = {}
 
-    class _FakeApp:
-        def run(self, *, host, port, debug, use_reloader):
-            captured["host"] = host
-            captured["port"] = port
+    def run(self, *, host, port, debug, use_reloader):
+        self.captured["host"] = host
+        self.captured["port"] = port
 
+
+def _patch_launcher(monkeypatch) -> _FakeApp:
     # web.py does ``from uir_pipeline.web import create_app`` inside ``main``,
     # so we patch the *source* module rather than the importer's re-export
     # (which does not exist at web.py's module scope).
-    monkeypatch.setattr(upipe_web, "create_app", lambda **kw: _FakeApp())
-    monkeypatch.delenv("HOST", raising=False)
-    monkeypatch.delenv("PORT", raising=False)
-    rc = web_launcher.main()
-    assert rc == 0
-    assert captured["host"] == "0.0.0.0"
-    # Default port is 5050 to dodge macOS AirPlay hold on :5000.
-    assert captured["port"] == 5050
-
-
-def test_launcher_host_override_honored(monkeypatch):
-    """``HOST=127.0.0.1`` overrides the LAN-visible default."""
-    import web as web_launcher
     import uir_pipeline.web as upipe_web
 
-    captured: dict = {}
+    app = _FakeApp()
+    monkeypatch.setattr(upipe_web, "create_app", lambda **kw: app)
+    monkeypatch.delenv("HOST", raising=False)
+    monkeypatch.delenv("PORT", raising=False)
+    monkeypatch.delenv("SESSION_COOKIE_SECURE", raising=False)
+    monkeypatch.delenv("UIR_ALLOW_INSECURE_BIND", raising=False)
+    return app
 
-    class _FakeApp:
-        def run(self, *, host, port, debug, use_reloader):
-            captured["host"] = host
-            captured["port"] = port
 
-    monkeypatch.setattr(upipe_web, "create_app", lambda **kw: _FakeApp())
-    monkeypatch.setenv("HOST", "127.0.0.1")
+def test_launcher_default_host_is_loopback(monkeypatch):
+    """main() binds 127.0.0.1 by default.
+
+    It used to default to 0.0.0.0 while the docstring claimed "MVP: no auth".
+    Once accounts landed, a LAN bind over plain HTTP put passwords and session
+    cookies on the wire in cleartext.
+    """
+    import web as web_launcher
+
+    app = _patch_launcher(monkeypatch)
+    assert web_launcher.main() == 0
+    assert app.captured["host"] == "127.0.0.1"
+    # Default port is 5050 to dodge macOS AirPlay hold on :5000.
+    assert app.captured["port"] == 5050
+
+
+def test_launcher_host_and_port_overrides_honored(monkeypatch):
+    import web as web_launcher
+
+    app = _patch_launcher(monkeypatch)
+    monkeypatch.setenv("HOST", "localhost")
     monkeypatch.setenv("PORT", "8080")
-    rc = web_launcher.main()
-    assert rc == 0
-    assert captured["host"] == "127.0.0.1"
-    assert captured["port"] == 8080
+    assert web_launcher.main() == 0
+    assert app.captured["host"] == "localhost"
+    assert app.captured["port"] == 8080
+
+
+def test_launcher_refuses_a_lan_bind_over_plain_http(monkeypatch):
+    """The guard must run in the launcher, not only in `python -m`."""
+    import web as web_launcher
+
+    app = _patch_launcher(monkeypatch)
+    monkeypatch.setenv("HOST", "0.0.0.0")
+    with pytest.raises(SystemExit, match="cleartext"):
+        web_launcher.main()
+    assert "host" not in app.captured, "server must not start"
+
+
+def test_launcher_allows_a_lan_bind_behind_tls(monkeypatch):
+    import web as web_launcher
+
+    app = _patch_launcher(monkeypatch)
+    monkeypatch.setenv("HOST", "0.0.0.0")
+    monkeypatch.setenv("SESSION_COOKIE_SECURE", "1")
+    assert web_launcher.main() == 0
+    assert app.captured["host"] == "0.0.0.0"
+
+
+def test_launcher_refuses_before_building_the_app(monkeypatch):
+    """A refused bind must not pay for create_app (which spawns nothing, but
+    would open the SQLite user store and resolve the secret key)."""
+    import uir_pipeline.web as upipe_web
+    import web as web_launcher
+
+    built: list[int] = []
+
+    def _boom(**_kw):
+        built.append(1)
+        raise AssertionError("create_app must not run on a refused bind")
+
+    monkeypatch.setattr(upipe_web, "create_app", _boom)
+    monkeypatch.setenv("HOST", "0.0.0.0")
+    monkeypatch.delenv("SESSION_COOKIE_SECURE", raising=False)
+    monkeypatch.delenv("UIR_ALLOW_INSECURE_BIND", raising=False)
+    with pytest.raises(SystemExit):
+        web_launcher.main()
+    assert built == []
 
 
 # ----------------------------------------------------------------------------
@@ -405,12 +477,11 @@ def test_status_endpoint_reflects_allowlisted_stage_meta(client):
     """Job.stage_meta propagated via /api/status reflects the allowlist filter."""
     jid = "filter-test"
     import uir_pipeline.web as web_mod
-    captured_jobs = web_mod.create_app(upload_dir=None, output_dir=None)
-    # Inject a fake job with mixed keys; check /api/status <id>.
-    with captured_jobs.test_request_context() if hasattr(captured_jobs, "test_request_context") else captured_jobs.test_client():
-        # Drop into the closure-local jobs dict via the public app.
-        pass
-    # Simpler: assert the to_public contract via Job.to_public directly.
+    # NOTE: this test asserts the ``Job.to_public`` allowlist directly; it
+    # never needed an app. Building one here used to be harmless, but
+    # ``create_app`` now provisions a SQLite user store and a secret key,
+    # so instantiating it with default paths would write into the repo's
+    # real ``data/`` directory during a test run.
     job = web_mod.Job(job_id=jid, stage_meta={
         "caption_records_total": 5,
         "caption_records_with_text": 5,
@@ -552,3 +623,34 @@ def test_result_endpoint_409_if_not_done(client, monkeypatch, sample_pdf):
     r = client.get(f"/api/result/{job_id}")
     assert r.status_code == 409
     assert "running" in r.get_json()["error"].lower() or "queued" in r.get_json()["error"].lower()
+
+
+def test_run_rejects_a_legacy_binary_office_file(client, tmp_path):
+    """`.doc` is recognised by the router but classified SKIP.
+
+    Gating on SUPPORTED_EXTENSIONS accepted the upload and then failed the job
+    several seconds later inside `ingest_any`. Reject it at the door.
+    """
+    legacy = tmp_path / "old.doc"
+    legacy.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1legacy ole2")
+    with legacy.open("rb") as fh:
+        resp = client.post(
+            "/api/run",
+            data={"file": (fh, "old.doc")},
+            content_type="multipart/form-data",
+        )
+    assert resp.status_code == 400
+    assert "unsupported" in (resp.get_json()["error"] or "").lower()
+
+
+def test_run_error_message_does_not_advertise_unconvertible_formats(client, tmp_path):
+    bad = tmp_path / "foo.xyz"
+    bad.write_bytes(b"\x00\x01")
+    with bad.open("rb") as fh:
+        resp = client.post(
+            "/api/run", data={"file": (fh, "foo.xyz")},
+            content_type="multipart/form-data",
+        )
+    msg = resp.get_json()["error"]
+    assert ".doc," not in msg and ".ppt," not in msg and ".xls," not in msg
+    assert ".pdf" in msg and ".ipynb" in msg

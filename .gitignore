@@ -40,6 +40,30 @@ data/output/*
 # Per-doc structured logs
 data/logs/*
 !data/logs/.gitkeep
+# Weaviate's on-disk state -- docker-compose.yml bind-mounts this directory
+# to /var/lib/weaviate. It holds raft state, the schema DB, and migration
+# flags: pure runtime data, and specific to whoever last ran the container.
+# It was tracked up to this commit, so a fresh clone booted Weaviate onto a
+# stranger's raft node id. Trailing slash + explicit db glob because the
+# `data/*.db` rule below only matches the top level, not `data/weaviate/*.db`.
+data/weaviate/
+
+# --- Design system build artifacts ---
+# Frontend/ is design source. _ds_bundle.js / _ds_manifest.json are emitted
+# by the Aperture design compiler, not hand-edited. The app never reads them;
+# it loads its own vendored primitives from static/ds/.
+Frontend/_ds_bundle.js
+Frontend/_ds_manifest.json
+
+# --- Local auth state ---
+# Session-signing key, generated on first boot when SECRET_KEY is unset.
+# Committing this would let anyone forge a session cookie.
+data/.secret_key
+# User table (SQLite + its WAL sidecars). Glob rather than exact names so a
+# future rename of the DB file cannot silently un-ignore a password store.
+data/*.db
+data/*.db-wal
+data/*.db-shm
 
 # --- Test fixtures ---
 # Real PDFs we use for integration tests; pulled separately per fixture.

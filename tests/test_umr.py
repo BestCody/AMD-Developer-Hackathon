@@ -317,26 +317,36 @@ def test_unknown_node_type_emits_diagnostic_comment():
     assert "<!-- unknown node type: mystery_node -->" in out
 
 
-def test_end_to_end_pipeline_emit(tmp_path: Path):
+def test_end_to_end_pipeline_emit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Sanity: invoking the orchestrator writes a non-empty .umr.md file.
 
     Lightweight -- patches the heavy-dep imports so the test runs without
     BGE / spaCy / pdfplumber. We don't go through Tier 3 caption stage.
     """
+    import importlib.machinery
     import sys
     import types
 
     # Stub out the heavy deps that the orchestrator eagerly imports.
+    #
+    # `__spec__` is load-bearing, not decoration: docling's import chain calls
+    # `importlib.util.find_spec("spacy")`, which raises
+    # `ValueError: spacy.__spec__ is None` on a bare ModuleType. That surfaced
+    # as `DoclingUnavailable: docling package not importable`, so this test
+    # only passed when an earlier test had already imported the real spacy.
+    #
+    # `monkeypatch.setitem`, not a raw assignment: the stub used to persist in
+    # `sys.modules` for every later test in the session.
     spacy_stub = types.ModuleType("spacy")
-    spacy_stub.load = lambda *_a, **_k: None
-    sys.modules["spacy"] = spacy_stub
+    spacy_stub.__spec__ = importlib.machinery.ModuleSpec("spacy", loader=None)
 
     class _FakeNLP:
         def __call__(self, _txt):
             from types import SimpleNamespace
             return SimpleNamespace(ents=[])
+
     spacy_stub.load = lambda _id: _FakeNLP()
-    sys.modules["spacy"] = spacy_stub
+    monkeypatch.setitem(sys.modules, "spacy", spacy_stub)
     # Use the test fixtures' pdfplumber shim from conftest.
     pdf = Path("tests/fixtures/sample_pdfs/flat_text.pdf")
     if not pdf.is_file():
@@ -357,3 +367,90 @@ def test_end_to_end_pipeline_emit(tmp_path: Path):
     uir = json.loads(result.out_path.read_text())
     assert uir["semantics"]["entities"] == []
     assert uir["semantics"]["relationships"] == []
+
+
+# ---------------------------------------------------------------------------
+# Empty-section rollback under an intent filter
+# ---------------------------------------------------------------------------
+
+def _render(node, intent_filter):
+    from uir_pipeline import umr as umr_mod
+
+    lines: list[str] = []
+    n = umr_mod._render_children_recursive(
+        node, lines, intent_filter=intent_filter, recursion_depth=0
+    )
+    return n, lines
+
+
+def test_filtered_out_section_leaves_no_dangling_heading():
+    """A section with no surviving chunks must not render its heading.
+
+    The rollback used to pop trailing blanks and then one `## ` line. An
+    `<!-- unknown node type -->` comment inside the section stopped the blank
+    pop, the heading check failed, and `## Empty Section` survived with no
+    body -- a heading the agent would try to read under.
+    """
+    node = {"type": "root", "children": [
+        {"type": "section", "id": "sec_1", "title": "Empty Section", "children": [
+            {"type": "chunk", "id": "chunk_zzz", "text": "filtered out", "page": 1},
+            {"type": "mystery"},
+        ]},
+    ]}
+    rendered, lines = _render(node, {"matches": [{"chunk_id": "chunk_keep"}]})
+    assert rendered == 0
+    assert lines == [], f"section left residue: {lines}"
+
+
+def test_section_with_a_surviving_chunk_keeps_its_heading():
+    node = {"type": "root", "children": [
+        {"type": "section", "id": "sec_1", "title": "Kept Section", "children": [
+            {"type": "chunk", "id": "chunk_keep", "text": "survives", "page": 1},
+        ]},
+    ]}
+    rendered, lines = _render(node, {"matches": [{"chunk_id": "chunk_keep"}]})
+    assert rendered == 1
+    assert any(line.startswith("## ") for line in lines)
+    assert any("survives" in line for line in lines)
+
+
+def test_rollback_does_not_eat_a_preceding_sibling_section():
+    """Truncation must remove only what the empty section appended."""
+    node = {"type": "root", "children": [
+        {"type": "section", "id": "sec_1", "title": "Kept", "children": [
+            {"type": "chunk", "id": "chunk_keep", "text": "survives", "page": 1},
+        ]},
+        {"type": "section", "id": "sec_2", "title": "Dropped", "children": [
+            {"type": "chunk", "id": "chunk_gone", "text": "filtered", "page": 2},
+        ]},
+    ]}
+    rendered, lines = _render(node, {"matches": [{"chunk_id": "chunk_keep"}]})
+    assert rendered == 1
+    text = "\n".join(lines)
+    assert "Kept" in text and "survives" in text
+    assert "Dropped" not in text
+
+
+def test_no_filter_renders_every_section():
+    """intent_filter=None is the full-document view; nothing is rolled back."""
+    node = {"type": "root", "children": [
+        {"type": "section", "id": "sec_1", "title": "Anything", "children": [
+            {"type": "chunk", "id": "chunk_a", "text": "body", "page": 1},
+        ]},
+    ]}
+    rendered, lines = _render(node, None)
+    assert rendered == 1
+    assert any(line.startswith("## ") for line in lines)
+
+
+def test_nested_empty_sections_collapse_entirely():
+    node = {"type": "root", "children": [
+        {"type": "section", "id": "sec_1", "title": "Outer", "children": [
+            {"type": "section", "id": "sec_2", "title": "Inner", "children": [
+                {"type": "chunk", "id": "chunk_gone", "text": "filtered", "page": 1},
+            ]},
+        ]},
+    ]}
+    rendered, lines = _render(node, {"matches": [{"chunk_id": "chunk_keep"}]})
+    assert rendered == 0
+    assert lines == [], f"nested sections left residue: {lines}"

@@ -10,8 +10,6 @@ Provides:
 """
 from __future__ import annotations
 
-import os
-import shutil
 
 # Pdfplumber fast path was removed -- tests inject a fake converter via
 # ``monkeypatch`` instead. The orchestrator's docling branch is now the

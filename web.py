@@ -1,21 +1,30 @@
-"""web.py -- root launcher for the Phase N web UI.
+"""web.py -- root launcher for the MonadLabs console.
 
 Usage:
-    python web.py                              # http://0.0.0.0:5050 (LAN-visible; default)
-    HOST=127.0.0.1 python web.py               # loopback-only (private dev)
+    python web.py                              # http://127.0.0.1:5050 (loopback; default)
     PORT=8080 python web.py                    # custom port (5050 default avoids macOS AirPlay :5000 clash)
     UPLOAD_DIR=/tmp/foo python web.py          # custom upload dir
     OUTPUT_DIR=/tmp/bar python web.py          # custom output dir
     LOG_LEVEL=DEBUG python web.py              # verbose logging
 
-LAN discoverability:
-    The launcher enumerates the host's non-loopback IPv4 addresses and
-    prints the URLs at startup so you can browse from your phone or a
-    sibling laptop.  No mDNS, no port forwarding -- plain ``0.0.0.0``
-    bind.  (MVP: no auth.  Anyone on the LAN can upload PDFs.)
+    # LAN-visible. The console has user accounts now, so a routable bind over
+    # plain HTTP puts passwords and session cookies on the wire in cleartext.
+    # `assert_safe_bind` refuses that unless you say so explicitly:
+    HOST=0.0.0.0 SESSION_COOKIE_SECURE=1 python web.py    # TLS terminator in front
+    HOST=0.0.0.0 UIR_ALLOW_INSECURE_BIND=1 python web.py  # trusted network, eyes open
 
-Heavy-dep startup (BGE / spaCy / pdfplumber) happens lazily on the first
-job, not at server start -- so the server is up in <2s even on a cold box.
+This used to default to ``0.0.0.0`` and its docstring used to say "MVP: no
+auth. Anyone on the LAN can upload PDFs." Both stopped being true when
+accounts landed: the risk changed from "a stranger uploads a PDF" to "a
+stranger reads your password". Hence the loopback default.
+
+LAN discoverability:
+    When bound to ``0.0.0.0`` the launcher enumerates the host's non-loopback
+    IPv4 addresses and prints the URLs at startup, so you can browse from your
+    phone or a sibling laptop. No mDNS, no port forwarding.
+
+Heavy-dep startup (torch / Docling / BGE) happens inside the pipeline worker
+on the first job, not at server start -- so the server is up in <2s cold.
 """
 from __future__ import annotations
 
@@ -83,10 +92,20 @@ def main() -> int:
     # Default port 5050 instead of 5000: macOS 12+ reserves :5000 for the
     # AirPlay Receiver (ControlCe), which silently intercepts our bind.
     port = int(os.environ.get("PORT", "5050"))
-    host = os.environ.get("HOST", "0.0.0.0")  # LAN-visible by default
+    # Loopback by default: this console has user accounts (see module docstring).
+    host = os.environ.get("HOST", "127.0.0.1")
 
-    from uir_pipeline.web import create_app
+    from uir_pipeline.web import (
+        assert_safe_bind,
+        create_app,
+        register_worker_shutdown,
+    )
+
+    # Before create_app, so a refused bind costs nothing.
+    assert_safe_bind(host, port)
+
     app = create_app(upload_dir=upload_dir, output_dir=output_dir)
+    register_worker_shutdown(app)
     log = logging.getLogger("web_cli")
     log.info("UIR web UI starting on %s:%d", host, port)
     log.info("uploads  -> %s", upload_dir)

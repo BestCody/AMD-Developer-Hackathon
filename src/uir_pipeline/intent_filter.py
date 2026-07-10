@@ -422,7 +422,7 @@ def filter_uirstream_by_intent(
     if out_path is not None:
         out_path = Path(out_path)
     keywords = _intent_keywords(intent)
-    src = json.loads(uir_path.read_text())
+    src = json.loads(uir_path.read_text(encoding="utf-8"))
     root = src.get("structure", {}).get("root", {})
 
     # Compute document-average chunk length once so _text_score stays O(1)
@@ -570,7 +570,9 @@ def filter_uirstream_by_intent(
                 # BM25-lite hit: chunk body / section title contains a
                 # keyword with measurable tf. Honest score + confident kind.
                 kind = "bm25-lite"
-                score_out: float = round(text_sc, 4)
+                # `| None` for the section-lift branch below, which means
+                # "no scoring signal" -- distinct from a BM25-lite score of 0.
+                score_out: float | None = round(text_sc, 4)
             else:
                 # Section-tree title lift pulled this chunk in but its
                 # own chunk-level section_path didn't fire _text_score.
@@ -660,7 +662,7 @@ def filter_uirstream_by_intent(
         target = uir_path.parent / (uir_path.stem + ".intent" + uir_path.suffix)
     else:
         target = out_path
-    target.write_text(json.dumps(new_src, indent=2))
+    target.write_text(json.dumps(new_src, indent=2), encoding="utf-8")
 
     return {
         "intent": intent,

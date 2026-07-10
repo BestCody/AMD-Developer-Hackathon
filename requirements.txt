@@ -34,11 +34,24 @@ Pillow>=10.0
 # LayoutLMv3 (`microsoft/layoutlmv3-base`) — text+bbox branch for MVP
 # (per PLAN.md §9 Phase A.5; avoids the Detectron2 dependency).
 torch>=2.1
-# Pin upper bound <4.45: transformers 4.46+ removed `forced_bos_token_id`
-# from `PretrainedConfig` and Florence-2's `trust_remote_code` modeling
-# file still reads it. caption.py patches at runtime, but the pin prevents
-# fresh pip resolutions from landing on a silently broken transformers.
-transformers>=4.36,<4.45
+# The old `<4.45` upper bound guarded against transformers 4.46+ removing
+# `forced_bos_token_id` from `PretrainedConfig`, which Florence-2's
+# `trust_remote_code` modeling file still reads. That guard is now redundant:
+# `caption.py` patches Florence2Config at load time (see the compat shim
+# around its `_get_dyn_cls` call), which is the actual fix.
+#
+# The bound was also unsatisfiable on Python 3.13 -- despite this file's
+# stated 3.10-3.13 target. `transformers<4.45` pins `tokenizers<0.20`, whose
+# last release predates cp313, so pip fell back to a Rust source build that
+# dies on `PyO3 0.21 max supported version 3.12`. Building it against the
+# stable ABI does not help either: tokenizers 0.19 calls the non-abi3
+# `PyUnicode_FromKindAndData`.
+#
+# Keep the `<5` cap. transformers 5.x is a major API break and this codebase
+# (caption.py's Florence-2 loader, layout.py's LayoutLMv3 branch) is written
+# against the 4.x surface. 4.46+ already pulls a tokenizers with cp313 wheels,
+# which is all Python 3.13 needed.
+transformers>=4.46,<5
 
 # --- Tier 3 image-awareness (per PLAN_TIER3.md) ---
 # Florence-2-base captioner (transformers + accelerate for device_map).
@@ -61,11 +74,30 @@ weaviate-client>=4.5
 # --- Web front-end (Phase N) ---
 flask>=3.1,<4
 
+# --- Multi-format ingress (PLAN §17) ---
+# `pipeline._extract_pptx_route` imports python-pptx directly: docling's layout
+# model runs on rendered page images, and an unrendered deck yields 0 regions,
+# so PPTX gets a native walk instead. It arrives transitively via docling today,
+# but a direct import needs a direct pin.
+python-pptx>=1.0
+
 # --- Dev tooling ---
 pytest>=8.0
 pytest-mock>=3.11
 mypy>=1.7
 ruff>=0.1
+# scripts/generate_fixtures.py builds tests/fixtures/sample_pdfs/*.pdf. Without
+# it those fixtures never appear and the tests that need them *skip silently*
+# -- which is how three Docling adapter bugs reached main. Not optional.
+reportlab>=4.0
+# Fixture builders for the multi-format ingress tests (tests/test_ingest_any.py,
+# tests/integration/test_docling_route_e2e.py). Not imported by the pipeline.
+python-docx>=1.1
+openpyxl>=3.1
+# tests/test_uir_schema_artifact.py validates emitted UIRs against the exported
+# docs/uir.schema.json. Pydantic only ever checks documents against the *model*,
+# so nothing else notices when the published contract drifts away from it.
+jsonschema>=4.0
 
 # --- Phase 18 PDF→Markdown fast-path (PLAN §17 §OCR follow-up) ---
 # Docling (IBM, MIT): transformer-based PDF->DoclingDocument emitter that

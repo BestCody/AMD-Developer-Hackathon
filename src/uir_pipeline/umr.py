@@ -42,7 +42,6 @@ Not in scope (yet):
 """
 from __future__ import annotations
 
-import re
 from typing import Any
 
 # Module-level constants carried as ``Final`` for stable test-snapshot
@@ -244,8 +243,11 @@ def build_umr(
 
     # Filtered-view banner: a single italic line so an agent reading the
     # UMR knows the document is narrowed.
+    # Test `intent_filter` directly in the guard (not a precomputed bool) so
+    # the body is narrowed to a non-None dict. `is_filtered` is still needed
+    # below, at the _render_children_recursive call.
     is_filtered = bool(intent_filter and intent_filter.get("matches"))
-    if is_filtered:
+    if intent_filter and is_filtered:
         intent_label = _coerce_str(
             intent_filter.get("intent"), default="(intent)",
         ).strip() or "(intent)"
@@ -364,15 +366,16 @@ def _render_root_children(
                 recursion_depth=recursion_depth + 1,
             )
             if sub_rendered == 0 and intent_filter:
-                # No surviving chunks in this section under filter ->
-                # drop the empty heading we just appended so the agent
-                # doesn't see a dangling ``## foo`` with no body.
-                while lines and not lines[-1].strip():
-                    lines.pop()
-                if lines and lines[-1].startswith("## "):
-                    lines.pop()
-                # Also drop the previous-line blank if that's what produced
-                # ``len(lines) == pre_lines_len + 1``.
+                # No surviving chunks in this section under filter -> drop
+                # everything this section appended, so the agent never sees a
+                # dangling ``## foo`` with no body.
+                #
+                # Truncating to the recorded length is exact. Popping trailing
+                # blanks and then one ``## `` line was not: when the recursion
+                # emitted an ``<!-- unknown node type -->`` comment, the blank
+                # pop stopped on it, the heading check failed, and the empty
+                # heading survived anyway.
+                del lines[pre_lines_len:]
             else:
                 n_rendered += sub_rendered
         else:

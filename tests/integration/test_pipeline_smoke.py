@@ -63,8 +63,12 @@ def test_pipeline_smoke_on_flat_text(tmp_path: Path) -> None:
     # Structure is non-empty.
     assert parsed.structure.root.children, "no chunk children emitted"
 
-    # At least one chunk has a 384-dim embedding attached.
-    vectors = [cn.modal_features.get("vector") for cn in parsed.structure.root.children]
+    # At least one chunk has a 384-dim embedding attached. `root.children` is a
+    # union of StructureNode | ChunkNode -- the Docling route nests chunks under
+    # section nodes, which carry no `modal_features`. Walk for the chunks.
+    chunks = list(_walk_chunk_nodes(parsed.structure.root))
+    assert chunks, "no chunk nodes anywhere in the structure tree"
+    vectors = [c.modal_features.get("vector") for c in chunks]
     vectors = [v for v in vectors if v is not None]
     assert vectors, "no chunks have embeddings"
     assert any(v.get("dim") == 384 for v in vectors)
@@ -72,6 +76,15 @@ def test_pipeline_smoke_on_flat_text(tmp_path: Path) -> None:
     # Sanity: provenance populated.
     assert parsed.provenance.extraction.model == "LayoutLMv3-heuristic"
     assert parsed.provenance.normalization.version == "1.0"
+
+
+def _walk_chunk_nodes(node):
+    """Yield every ChunkNode under ``node``, at any depth."""
+    for child in getattr(node, "children", None) or []:
+        if getattr(child, "type", None) == "chunk":
+            yield child
+        else:
+            yield from _walk_chunk_nodes(child)
 
 
 def test_pipeline_emits_zero_chunks_on_empty_pdf(tmp_path: Path) -> None:
@@ -83,7 +96,6 @@ def test_pipeline_emits_zero_chunks_on_empty_pdf(tmp_path: Path) -> None:
     """
     import io
     from pypdf import PdfWriter
-    from pypdf.generic import RectangleObject
 
     # Generate a minimal 1-page PDF via pypdf (no reportlab dep).
     w = PdfWriter()

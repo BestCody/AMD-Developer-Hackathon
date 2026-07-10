@@ -1,0 +1,9 @@
+/* Aperture Design System — global stylesheet entry point.
+   Consumers link only this file; everything below is transitively shipped. */
+
+@import "tokens/fonts.css";
+@import "tokens/colors.css";
+@import "tokens/typography.css";
+@import "tokens/spacing.css";
+@import "tokens/motion.css";
+@import "tokens/base.css";

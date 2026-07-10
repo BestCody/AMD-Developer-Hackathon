@@ -192,7 +192,8 @@ __all__ = [
     "DEFAULT_BGE_MODEL",
     "DEFAULT_CHUNK_OVERLAP_PCT",
     "DEFAULT_CHUNK_TARGET_TOKENS",
-    "UID_NAMESPACE",
+    # No "UID_NAMESPACE": it never existed. `deterministic_node_id` uses
+    # `uuid.NAMESPACE_URL` directly, and naming it here made `import *` raise.
     "bbox_from_pixel",
     "bbox_union",
     "count_tokens",

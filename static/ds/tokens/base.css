@@ -1,0 +1,28 @@
+/* ==========================================================================
+   Aperture — Base resets (the only non-token rules in the global closure)
+   ========================================================================== */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--surface-canvas);
+  color: var(--text-body);
+  font-family: var(--font-text);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+a {
+  color: var(--accent-primary);
+  text-decoration: none;
+}
+a:hover {
+  color: var(--accent-primary-focus);
+}
+
+::selection {
+  background: var(--blue-100);
+  color: var(--text-ink);
+}
