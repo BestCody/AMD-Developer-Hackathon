@@ -17,6 +17,12 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover -- annotations only
+    # reportlab is imported lazily inside each builder, so the string
+    # annotation below named a symbol nothing ever bound.
+    import reportlab.platypus
 
 # Make src/ importable when running as a script.
 _HERE = Path(__file__).resolve().parent

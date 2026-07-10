@@ -237,6 +237,16 @@ def test_chat_with_no_documents_does_not_call_a_model(app):
     assert "haven't converted any documents" in body["answer"]
 
 
+def test_chat_no_documents_response_has_the_full_key_set(app):
+    """A client reading `cited` must not have to special-case this branch."""
+    c = app.test_client()
+    _signup(c)
+    body = c.post("/api/chat", json={"message": "anything?"}).get_json()
+    for key in ("answer", "citations", "cited", "invalid_citations", "grounded", "model"):
+        assert key in body, f"missing {key}"
+    assert body["cited"] == [] and body["invalid_citations"] == []
+
+
 def test_chat_requires_a_message(app):
     c = app.test_client()
     _signup(c)

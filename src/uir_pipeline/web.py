@@ -1080,13 +1080,18 @@ def create_app(
             ]
 
         if not paths:
+            # Same key set as every other /api/chat response: a client that
+            # reads `cited` should not have to special-case this branch.
             return jsonify({
                 "answer": (
                     "You haven't converted any documents yet. Upload one and "
                     "I'll be able to answer questions about it."
                 ),
                 "citations": [],
+                "cited": [],
+                "invalid_citations": [],
                 "grounded": False,
+                "model": None,
             })
 
         history = body.get("history") if isinstance(body.get("history"), list) else []

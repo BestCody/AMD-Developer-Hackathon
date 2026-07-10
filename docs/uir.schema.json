@@ -142,7 +142,7 @@
     },
     "Metadata": {
       "additionalProperties": false,
-      "description": "PDF / document metadata.",
+      "description": "Document metadata (PDF + multi-format Phase 17+).\n\n``page_count`` remains required (gte 0); for pageless formats\n(TXT/MD/code/CSV with no native page concept) the caller synthesises\n``page_count=1`` via :func:`src.uir_pipeline.chunk.paginate_pageless`.\n``format`` mirrors :attr:`Source.format` so JSON consumers can\npivot on a single field without joining.",
       "properties": {
         "title": {
           "title": "Title",
@@ -209,6 +209,19 @@
           "default": null,
           "description": "Inferred document domain (e.g. 'financial'), or null.",
           "title": "Domain"
+        },
+        "format": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Mirror of ``Source.format`` for convenience. None when the UIR was emitted by pre-\u00a717 code paths (legacy PDFs only).",
+          "title": "Format"
         }
       },
       "required": [
@@ -323,7 +336,7 @@
     },
     "Source": {
       "additionalProperties": false,
-      "description": "Document source descriptor (Phase 1: PDF files).",
+      "description": "Document source descriptor.\n\n``format`` is widened from ``Literal[\"PDF\"]`` to ``str`` (PLAN \u00a717\n\u00a7Multi-format) so DOCX/PPTX/XLSX/HTML/EPUB/LaTeX/IPYNB/RTF/TXT/MD/CSV/\nimage/code can flow through the same UIR contract without per-format\nschema churn. Per-format validation is delegated to ``format_router``\nwhich classifies the file at ingest time. ``route`` records the\nextraction route chosen for this document so downstream consumers\ncan reconstruct provenance. Both new fields default to ``None`` /\nlegacy ``\"PDF\"`` so pre-\u00a717 v1 UIRs remain valid.",
       "properties": {
         "uri": {
           "description": "Source URI (e.g. s3://, file://, https://).",
@@ -331,10 +344,23 @@
           "type": "string"
         },
         "format": {
-          "const": "PDF",
           "default": "PDF",
+          "description": "Format of the source document. Phase 1 was ``PDF`` only; Phase 17+ allows DOCX/PPTX/XLSX/HTML/EPUB/LaTeX/IPYNB/RTF/TXT/MD/CSV/IMAGE/code. Validation deferred to ``format_router.classify_route`` at ingest.",
           "title": "Format",
           "type": "string"
+        },
+        "route": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Extraction route dispatched by ``format_router``. One of ``pdf``, ``docling``, ``text``, ``image``, ``skip``. Optional for backwards compatibility with pre-\u00a717 UIRs.",
+          "title": "Route"
         },
         "mime_type": {
           "description": "IANA MIME type (e.g. application/pdf).",
@@ -511,8 +537,11 @@
       "type": "string"
     },
     "modal_type": {
-      "const": "document",
       "default": "document",
+      "enum": [
+        "document",
+        "image"
+      ],
       "title": "Modal Type",
       "type": "string"
     },

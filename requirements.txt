@@ -94,6 +94,10 @@ reportlab>=4.0
 # tests/integration/test_docling_route_e2e.py). Not imported by the pipeline.
 python-docx>=1.1
 openpyxl>=3.1
+# tests/test_uir_schema_artifact.py validates emitted UIRs against the exported
+# docs/uir.schema.json. Pydantic only ever checks documents against the *model*,
+# so nothing else notices when the published contract drifts away from it.
+jsonschema>=4.0
 
 # --- Phase 18 PDF→Markdown fast-path (PLAN §17 §OCR follow-up) ---
 # Docling (IBM, MIT): transformer-based PDF->DoclingDocument emitter that
