@@ -1142,42 +1142,75 @@ def _advance(
         job.progress_percent = max(0, min(100, int(percent)))
 
 
+#: Hosts whose traffic never leaves the machine.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def is_loopback_host(host: str) -> bool:
+    return (host or "").strip().lower() in _LOOPBACK_HOSTS
+
+
+def assert_safe_bind(host: str, port: int) -> None:
+    """Refuse to serve auth over plain HTTP on a routable interface.
+
+    Passwords are POSTed and the session cookie is replayed on every request.
+    Over plain HTTP both cross the network in cleartext, so anyone on the same
+    wifi can read them or steal the session outright. Loopback is fine -- the
+    traffic never leaves the machine. A routable bind is not, unless a TLS
+    terminator sits in front, which is exactly what ``SESSION_COOKIE_SECURE``
+    asserts.
+
+    Every entrypoint must call this. ``web.py`` at the repo root is the one
+    the README tells people to run, and it binds ``0.0.0.0`` by history.
+
+    Raises:
+        SystemExit: routable bind, no TLS, no explicit override.
+    """
+    if is_loopback_host(host) or _env_flag("SESSION_COOKIE_SECURE", default=False):
+        return
+    if not _env_flag("UIR_ALLOW_INSECURE_BIND", default=False):
+        raise SystemExit(
+            f"Refusing to serve on {host}:{port} over plain HTTP.\n"
+            "This console has user accounts: passwords and session cookies "
+            "would cross the network in cleartext.\n\n"
+            "  - Put a TLS terminator in front and set SESSION_COOKIE_SECURE=1, or\n"
+            "  - bind loopback with HOST=127.0.0.1, or\n"
+            "  - set UIR_ALLOW_INSECURE_BIND=1 if this network is genuinely trusted."
+        )
+    logger.warning(
+        "serving on %s over plain HTTP with UIR_ALLOW_INSECURE_BIND=1: "
+        "passwords and session cookies are readable by anyone on this network",
+        host,
+    )
+
+
+def register_worker_shutdown(app: Flask) -> None:
+    """Ask the pipeline child to stop between jobs at interpreter exit.
+
+    Entrypoints call this; ``create_app`` must not. The factory runs once per
+    test, and an atexit handler per app would accumulate unboundedly and fire
+    after pytest has closed the streams the worker logs to.
+    """
+    worker = app.config.get("PIPELINE_WORKER")
+    if worker is not None:
+        atexit.register(worker.shutdown)
+
+
 # Allow ``python -m uir_pipeline.web`` for power users.
 if __name__ == "__main__":  # pragma: no cover
-    import os
-
     logging.basicConfig(level=logging.INFO)
-    port = int(os.environ.get("PORT", "5000"))
-    host = os.environ.get("HOST", "127.0.0.1")
-
-    # Passwords are POSTed and the session cookie is replayed on every request.
-    # Over plain HTTP both cross the network in cleartext, so anyone on the same
-    # wifi can read them or steal the session. Loopback is fine (the traffic
-    # never leaves the machine); a routable bind is not, unless a TLS terminator
-    # sits in front -- which is exactly what SESSION_COOKIE_SECURE asserts.
-    _loopback = host in ("127.0.0.1", "::1", "localhost")
-    if not _loopback and not _env_flag("SESSION_COOKIE_SECURE", default=False):
-        if not _env_flag("UIR_ALLOW_INSECURE_BIND", default=False):
-            raise SystemExit(
-                f"Refusing to serve on {host}:{port} over plain HTTP.\n"
-                "Passwords and session cookies would cross the network in "
-                "cleartext.\n\n"
-                "  - Put a TLS terminator in front and set SESSION_COOKIE_SECURE=1, or\n"
-                "  - keep HOST=127.0.0.1 (the default), or\n"
-                "  - set UIR_ALLOW_INSECURE_BIND=1 if this network is genuinely trusted."
-            )
-        logger.warning(
-            "serving on %s over plain HTTP with UIR_ALLOW_INSECURE_BIND=1: "
-            "passwords and session cookies are readable by anyone on this network",
-            host,
-        )
+    _port = int(os.environ.get("PORT", "5000"))
+    _host = os.environ.get("HOST", "127.0.0.1")
+    assert_safe_bind(_host, _port)
 
     _app = create_app()
-    _worker = _app.config.get("PIPELINE_WORKER")
-    if _worker is not None:
-        # Ask the child to stop between jobs rather than be killed mid-write.
-        atexit.register(_worker.shutdown)
-    _app.run(host=host, port=port, debug=False, use_reloader=False)
+    register_worker_shutdown(_app)
+    _app.run(host=_host, port=_port, debug=False, use_reloader=False)
 
 
-__all__ = ["create_app"]
+__all__ = [
+    "assert_safe_bind",
+    "create_app",
+    "is_loopback_host",
+    "register_worker_shutdown",
+]

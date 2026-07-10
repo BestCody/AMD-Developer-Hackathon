@@ -357,3 +357,81 @@ def test_list_users_returns_no_password_hashes(tmp_path):
     (row,) = store.list_users()
     assert "password_hash" not in row and "password" not in row
     assert row["email"] == "a@b.co"
+
+
+# ---------------------------------------------------------------------------
+# Bind safety: auth over plain HTTP on a routable interface
+# ---------------------------------------------------------------------------
+# `web.py` at the repo root is the entrypoint the README documents, and it
+# bound 0.0.0.0 by default while its docstring still claimed "MVP: no auth".
+# Once accounts landed, that put passwords and session cookies on the wire.
+
+def test_loopback_hosts_are_recognised():
+    from uir_pipeline.web import is_loopback_host
+
+    for host in ("127.0.0.1", "localhost", "::1", "LOCALHOST", " 127.0.0.1 "):
+        assert is_loopback_host(host), host
+    for host in ("0.0.0.0", "192.168.1.10", "10.0.0.5", ""):
+        assert not is_loopback_host(host), host
+
+
+def test_loopback_bind_is_allowed(monkeypatch):
+    from uir_pipeline.web import assert_safe_bind
+
+    monkeypatch.delenv("SESSION_COOKIE_SECURE", raising=False)
+    monkeypatch.delenv("UIR_ALLOW_INSECURE_BIND", raising=False)
+    assert_safe_bind("127.0.0.1", 5050)  # must not raise
+
+
+def test_routable_bind_over_plain_http_is_refused(monkeypatch):
+    from uir_pipeline.web import assert_safe_bind
+
+    monkeypatch.delenv("SESSION_COOKIE_SECURE", raising=False)
+    monkeypatch.delenv("UIR_ALLOW_INSECURE_BIND", raising=False)
+    with pytest.raises(SystemExit, match="cleartext"):
+        assert_safe_bind("0.0.0.0", 5050)
+
+
+def test_routable_bind_allowed_behind_tls(monkeypatch):
+    from uir_pipeline.web import assert_safe_bind
+
+    monkeypatch.setenv("SESSION_COOKIE_SECURE", "1")
+    monkeypatch.delenv("UIR_ALLOW_INSECURE_BIND", raising=False)
+    assert_safe_bind("0.0.0.0", 5050)  # must not raise
+
+
+def test_routable_bind_allowed_with_explicit_override(monkeypatch):
+    from uir_pipeline.web import assert_safe_bind
+
+    monkeypatch.delenv("SESSION_COOKIE_SECURE", raising=False)
+    monkeypatch.setenv("UIR_ALLOW_INSECURE_BIND", "1")
+    assert_safe_bind("0.0.0.0", 5050)  # must not raise, but warns
+
+
+def test_root_launcher_defaults_to_loopback():
+    """`python web.py` must not expose accounts to the LAN by default."""
+    import ast
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parent.parent / "web.py"
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    defaults = [
+        node.args[1].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get"
+        and len(node.args) == 2
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == "HOST"
+        and isinstance(node.args[1], ast.Constant)
+    ]
+    assert defaults == ["127.0.0.1"], f"HOST default is {defaults}"
+
+
+def test_root_launcher_calls_the_bind_guard():
+    """A second entrypoint must not bypass assert_safe_bind."""
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent / "web.py").read_text(encoding="utf-8")
+    assert "assert_safe_bind(host, port)" in src

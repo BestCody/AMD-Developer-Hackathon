@@ -71,15 +71,38 @@ ls data/output/   # -> doc_<uuid>.uir.json
 # 5. Or sweep a directory of PDFs
 python pipeline.py tests/fixtures/sample_pdfs/ --output-data data/output/ --skip-weaviate
 
-# 6. Run the Phase N web UI (defaults to LAN-visible on :5050)
-python web.py                                 # http://192.168.0.X:5050
-HOST=127.0.0.1 python web.py                  # loopback-only
+# 6. Run the MonadLabs console (loopback on :5050)
+python web.py                                 # http://127.0.0.1:5050
 PORT=8080 python web.py                       # custom port
+
+# LAN-visible needs an explicit, informed opt-in (see below)
+HOST=0.0.0.0 SESSION_COOKIE_SECURE=1 python web.py    # behind a TLS terminator
+HOST=0.0.0.0 UIR_ALLOW_INSECURE_BIND=1 python web.py  # trusted network
 ```
 
-The web UI serves a single-page upload form with progress polling and
-an in-browser UIR JSON viewer. Default port is **5050** (not 5000) to
-avoid macOS AirPlay Receiver's hold on `:5000`.
+The console serves a single-page app: sign in, upload a document, watch stage
+progress, read the UIR / UMR, and ask grounded questions about what you
+converted. Default port is **5050** (not 5000) to avoid macOS AirPlay
+Receiver's hold on `:5000`.
+
+**It binds loopback by default, on purpose.** The console has user accounts,
+and over plain HTTP the password is POSTed in cleartext and the session cookie
+is replayed on every request — anyone on the same wifi can read either. A
+routable bind is refused at startup unless you put TLS in front
+(`SESSION_COOKIE_SECURE=1`) or explicitly accept the risk
+(`UIR_ALLOW_INSECURE_BIND=1`).
+
+There is no self-serve password reset: a reset link needs a mailbox, and no
+mail transport is configured. Recovery is an operator action requiring
+filesystem access to the user database:
+
+```bash
+python -m uir_pipeline.auth list                       # show accounts
+python -m uir_pipeline.auth reset alice@example.com    # prompts, no echo
+```
+
+Resetting a password does **not** invalidate existing sessions; rotate
+`SECRET_KEY` for that.
 
 ---
 

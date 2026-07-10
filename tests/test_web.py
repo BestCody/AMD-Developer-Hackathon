@@ -349,50 +349,100 @@ def test_list_lan_urls_empty_when_nothing_discoverable(monkeypatch):
     assert web_launcher.list_lan_urls(8080) == []
 
 
-def test_launcher_default_host_is_lan_visible(monkeypatch):
-    """main() binds 0.0.0.0 by default (LAN-visible) unless HOST overrides."""
-    import web as web_launcher
-    import uir_pipeline.web as upipe_web
+class _FakeApp:
+    """Stands in for the Flask app; `config` is read by register_worker_shutdown."""
 
-    captured: dict = {}
+    def __init__(self):
+        self.config: dict = {"PIPELINE_WORKER": None}
+        self.captured: dict = {}
 
-    class _FakeApp:
-        def run(self, *, host, port, debug, use_reloader):
-            captured["host"] = host
-            captured["port"] = port
+    def run(self, *, host, port, debug, use_reloader):
+        self.captured["host"] = host
+        self.captured["port"] = port
 
+
+def _patch_launcher(monkeypatch) -> _FakeApp:
     # web.py does ``from uir_pipeline.web import create_app`` inside ``main``,
     # so we patch the *source* module rather than the importer's re-export
     # (which does not exist at web.py's module scope).
-    monkeypatch.setattr(upipe_web, "create_app", lambda **kw: _FakeApp())
-    monkeypatch.delenv("HOST", raising=False)
-    monkeypatch.delenv("PORT", raising=False)
-    rc = web_launcher.main()
-    assert rc == 0
-    assert captured["host"] == "0.0.0.0"
-    # Default port is 5050 to dodge macOS AirPlay hold on :5000.
-    assert captured["port"] == 5050
-
-
-def test_launcher_host_override_honored(monkeypatch):
-    """``HOST=127.0.0.1`` overrides the LAN-visible default."""
-    import web as web_launcher
     import uir_pipeline.web as upipe_web
 
-    captured: dict = {}
+    app = _FakeApp()
+    monkeypatch.setattr(upipe_web, "create_app", lambda **kw: app)
+    monkeypatch.delenv("HOST", raising=False)
+    monkeypatch.delenv("PORT", raising=False)
+    monkeypatch.delenv("SESSION_COOKIE_SECURE", raising=False)
+    monkeypatch.delenv("UIR_ALLOW_INSECURE_BIND", raising=False)
+    return app
 
-    class _FakeApp:
-        def run(self, *, host, port, debug, use_reloader):
-            captured["host"] = host
-            captured["port"] = port
 
-    monkeypatch.setattr(upipe_web, "create_app", lambda **kw: _FakeApp())
-    monkeypatch.setenv("HOST", "127.0.0.1")
+def test_launcher_default_host_is_loopback(monkeypatch):
+    """main() binds 127.0.0.1 by default.
+
+    It used to default to 0.0.0.0 while the docstring claimed "MVP: no auth".
+    Once accounts landed, a LAN bind over plain HTTP put passwords and session
+    cookies on the wire in cleartext.
+    """
+    import web as web_launcher
+
+    app = _patch_launcher(monkeypatch)
+    assert web_launcher.main() == 0
+    assert app.captured["host"] == "127.0.0.1"
+    # Default port is 5050 to dodge macOS AirPlay hold on :5000.
+    assert app.captured["port"] == 5050
+
+
+def test_launcher_host_and_port_overrides_honored(monkeypatch):
+    import web as web_launcher
+
+    app = _patch_launcher(monkeypatch)
+    monkeypatch.setenv("HOST", "localhost")
     monkeypatch.setenv("PORT", "8080")
-    rc = web_launcher.main()
-    assert rc == 0
-    assert captured["host"] == "127.0.0.1"
-    assert captured["port"] == 8080
+    assert web_launcher.main() == 0
+    assert app.captured["host"] == "localhost"
+    assert app.captured["port"] == 8080
+
+
+def test_launcher_refuses_a_lan_bind_over_plain_http(monkeypatch):
+    """The guard must run in the launcher, not only in `python -m`."""
+    import web as web_launcher
+
+    app = _patch_launcher(monkeypatch)
+    monkeypatch.setenv("HOST", "0.0.0.0")
+    with pytest.raises(SystemExit, match="cleartext"):
+        web_launcher.main()
+    assert "host" not in app.captured, "server must not start"
+
+
+def test_launcher_allows_a_lan_bind_behind_tls(monkeypatch):
+    import web as web_launcher
+
+    app = _patch_launcher(monkeypatch)
+    monkeypatch.setenv("HOST", "0.0.0.0")
+    monkeypatch.setenv("SESSION_COOKIE_SECURE", "1")
+    assert web_launcher.main() == 0
+    assert app.captured["host"] == "0.0.0.0"
+
+
+def test_launcher_refuses_before_building_the_app(monkeypatch):
+    """A refused bind must not pay for create_app (which spawns nothing, but
+    would open the SQLite user store and resolve the secret key)."""
+    import uir_pipeline.web as upipe_web
+    import web as web_launcher
+
+    built: list[int] = []
+
+    def _boom(**_kw):
+        built.append(1)
+        raise AssertionError("create_app must not run on a refused bind")
+
+    monkeypatch.setattr(upipe_web, "create_app", _boom)
+    monkeypatch.setenv("HOST", "0.0.0.0")
+    monkeypatch.delenv("SESSION_COOKIE_SECURE", raising=False)
+    monkeypatch.delenv("UIR_ALLOW_INSECURE_BIND", raising=False)
+    with pytest.raises(SystemExit):
+        web_launcher.main()
+    assert built == []
 
 
 # ----------------------------------------------------------------------------
