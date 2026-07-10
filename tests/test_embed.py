@@ -135,7 +135,13 @@ class _FakeBatch:
 
 
 class _BatchCtx:
-    """Helper nested class reproducing weaviate's ``coll.batch.dynamic()`` ctx-mgr chain."""
+    """Helper nested class reproducing weaviate's ``coll.batch.dynamic()`` ctx-mgr chain.
+
+    ``failed_objects`` is part of the real contract: the batch API never
+    raises on a per-object rejection, it accumulates them here. Omitting it
+    from this stub is how ``upsert_chunks`` shipped a version that reported
+    server-rejected objects as written.
+    """
     def __init__(self, parent):
         self.parent = parent
         self._b = _FakeBatch()
@@ -146,22 +152,41 @@ class _BatchCtx:
         return False
     def dynamic(self):
         return self
+    @property
+    def failed_objects(self):
+        return self.parent.failed_objects
 
 
 class _FakeDataAPI:
-    """Stand-in for ``coll.data`` -- captures insert(...) kwargs."""
+    """Stand-in for ``coll.data`` -- captures insert/replace kwargs.
+
+    The real ``insert`` is insert-only and raises on a repeat uuid, so this
+    stub enforces that too: ``upsert_parent_doc`` must reach for ``replace``
+    when the object already exists.
+    """
     def __init__(self, parent):
         self.parent = parent
+    def exists(self, uuid):
+        return uuid in self.parent.by_uuid
     def insert(self, *, uuid=None, properties=None, vector=None):
-        self.parent.inserts.append({
-            "uuid": uuid, "properties": properties, "vector": vector,
-        })
+        if uuid in self.parent.by_uuid:
+            raise AssertionError(f"insert() called on existing uuid {uuid!r}")
+        rec = {"uuid": uuid, "properties": properties, "vector": vector}
+        self.parent.inserts.append(rec)
+        self.parent.by_uuid[uuid] = rec
+    def replace(self, *, uuid=None, properties=None, vector=None):
+        rec = {"uuid": uuid, "properties": properties, "vector": vector}
+        self.parent.replaces.append(rec)
+        self.parent.by_uuid[uuid] = rec
 
 
 class _FakeCollection:
     def __init__(self):
         self.batches: list[_FakeBatch] = []
         self.inserts: list[dict[str, Any]] = []
+        self.replaces: list[dict[str, Any]] = []
+        self.by_uuid: dict[str, dict[str, Any]] = {}
+        self.failed_objects: list[Any] = []
     @property
     def batch(self):
         return _BatchCtx(self)
@@ -174,11 +199,20 @@ class _FakeCollectionsAPI:
     def __init__(self):
         self._has: set[str] = set()
         self._defs: dict[str, _FakeCollection] = {}
+        self.created_properties: dict[str, list[Any]] = {}
     def exists(self, name):
         return name in self._has
-    def create(self, name, **props):
+    def create(self, name, **kwargs):
+        # The v4 client reads ``prop.textAnalyzer`` off every entry, so raw
+        # dicts blow up with AttributeError. Reject them here so this stub
+        # cannot green-light a schema the real server would never accept.
+        props = list(kwargs.get("properties") or ())
+        for p in props:
+            if isinstance(p, dict):
+                raise AttributeError("'dict' object has no attribute 'textAnalyzer'")
         self._has.add(name)
         self._defs[name] = _FakeCollection()
+        self.created_properties[name] = props
     def get(self, name):
         return self._defs.setdefault(name, _FakeCollection())
 
@@ -273,6 +307,88 @@ def test_upsert_parent_doc_writes_aggregate_with_stripped_uuid():
     assert ins["properties"]["page_count"] == 5
     assert ins["properties"]["chunk_count"] == 10
     assert ins["vector"] == mean_v
+
+
+def test_upsert_parent_doc_replaces_on_re_ingest():
+    """Regression: ``data.insert`` is insert-only and raised on re-ingest.
+
+    Doc ids are derived deterministically from the source URI, so ingesting
+    the same file twice hits the same uuid -- the common case, not an edge.
+    """
+    c = _FakeWeaviateClient()
+    doc_id = derive_doc_id("file:///tmp/x.pdf")
+    upsert_parent_doc(c, doc_id, [0.1, 0.2], extra={"page_count": 1, "chunk_count": 2})
+    upsert_parent_doc(c, doc_id, [0.9, 0.8], extra={"page_count": 3, "chunk_count": 4})
+    coll = c.collections.get(COLLECTION_PARENT_DOCS)
+    assert len(coll.inserts) == 1, "second ingest must not insert again"
+    assert len(coll.replaces) == 1, "second ingest must replace"
+    assert coll.by_uuid[strip_uir_prefix(doc_id)]["properties"]["page_count"] == 3
+
+
+# ----------------------------------------------------------------------------
+# upsert_chunks failure reporting
+# ----------------------------------------------------------------------------
+
+class _FailedObj:
+    def __init__(self, message):
+        self.message = message
+
+
+def test_upsert_chunks_raises_when_server_rejects_objects():
+    """Regression: rejected objects were counted as written.
+
+    The batch API reports per-object rejections on ``failed_objects``
+    rather than raising, so returning ``len(chunk_records)`` claimed chunks
+    were stored that are absent and unretrievable.
+    """
+    c = _FakeWeaviateClient()
+    # Create first: ``_ensure_collection`` would otherwise replace the
+    # collection object and discard the staged failure.
+    ensure_collections(c)
+    coll = c.collections.get(COLLECTION_CHUNKS)
+    coll.failed_objects = [_FailedObj("vector lengths don't match")]
+    records = [
+        {"uir_id": "chunk_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "text": "Hi.",
+         "page": 1, "chunk_index": 0, "vector": [0.0] * 4},
+    ]
+    with pytest.raises(RuntimeError, match=r"rejected 1/1"):
+        upsert_chunks(c, doc_id="doc_x", chunk_records=records)
+
+
+def test_upsert_chunks_returns_count_when_nothing_failed():
+    c = _FakeWeaviateClient()
+    records = [
+        {"uir_id": "chunk_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "text": "Hi.",
+         "page": 1, "chunk_index": 0, "vector": [0.0] * 4},
+    ]
+    assert upsert_chunks(c, doc_id="doc_x", chunk_records=records) == 1
+
+
+# ----------------------------------------------------------------------------
+# collection schemas
+# ----------------------------------------------------------------------------
+
+def test_collections_do_not_share_a_schema():
+    """Regression: both collections were created with the chunk schema, so
+    the parent doc's page_count/chunk_count were never declared."""
+    c = _FakeWeaviateClient()
+    ensure_collections(c)
+    chunk_props = {p.name for p in c.collections.created_properties[COLLECTION_CHUNKS]}
+    parent_props = {p.name for p in c.collections.created_properties[COLLECTION_PARENT_DOCS]}
+    assert "text_preview" in chunk_props
+    assert "text_preview" not in parent_props
+    assert {"page_count", "chunk_count"} <= parent_props
+    assert {"page_count", "chunk_count"}.isdisjoint(chunk_props)
+
+
+def test_ensure_collections_passes_property_objects_not_dicts():
+    """Regression: raw dicts raised AttributeError inside the v4 client."""
+    c = _FakeWeaviateClient()
+    ensure_collections(c)  # the stub raises AttributeError on dict properties
+    for name in (COLLECTION_CHUNKS, COLLECTION_PARENT_DOCS):
+        for p in c.collections.created_properties[name]:
+            assert not isinstance(p, dict)
+            assert hasattr(p, "name")
 
 
 # ----------------------------------------------------------------------------

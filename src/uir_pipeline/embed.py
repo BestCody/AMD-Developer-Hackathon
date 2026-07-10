@@ -111,25 +111,48 @@ def embed_texts(
 # Weaviate upsert helpers
 # ----------------------------------------------------------------------------
 
-def _ensure_collection(client: Any, name: str) -> None:
-    """Idempotent: create ``name`` if it doesn't exist.
+def _collection_properties(name: str) -> list[Any]:
+    """Return the ``Property`` schema for ``name``.
 
-    Properties mirror what the orchestrator writes per chunk: birck-by-brick
-    the schema; missing properties collapse on first write (Weaviate raises).
+    The two collections store different shapes and must not share a schema:
+    chunks are per-page fragments, the parent doc is a per-document
+    aggregate. Writing a property that isn't declared here relies on
+    Weaviate's auto-schema, which we don't want to depend on.
+
+    ``Property`` objects (not raw dicts) are required: the v4 client reads
+    ``prop.textAnalyzer`` off each entry during ``collections.create``.
     """
+    from weaviate.classes.config import DataType, Property
+
+    if name == COLLECTION_PARENT_DOCS:
+        return [
+            Property(name="uir_id", data_type=DataType.TEXT),
+            Property(name="page_count", data_type=DataType.INT),
+            Property(name="chunk_count", data_type=DataType.INT),
+        ]
+    return [
+        Property(name="uir_id", data_type=DataType.TEXT),
+        Property(name="doc_id", data_type=DataType.TEXT),
+        Property(name="page", data_type=DataType.INT),
+        Property(name="chunk_index", data_type=DataType.INT),
+        Property(name="text_preview", data_type=DataType.TEXT),
+    ]
+
+
+def _ensure_collection(client: Any, name: str) -> None:
+    """Idempotent: create ``name`` if it doesn't exist."""
     if client.collections.exists(name):
         return
-    # ``vectorizer_config=none`` because we BYO vectors (sentence-transformers).
+    # We BYO vectors (sentence-transformers), so the server must not try to
+    # vectorize. ``Vectorizer.none()`` rather than the newer
+    # ``Vectors.self_provided()`` because requirements.txt pins only
+    # ``weaviate-client>=4.5`` and the latter lands in a later 4.x.
+    from weaviate.classes.config import Configure
+
     client.collections.create(
         name=name,
-        vectorizer_config=None,
-        properties=[
-            {"name": "uir_id",        "dataType": ["text"]},
-            {"name": "doc_id",        "dataType": ["text"]},
-            {"name": "page",          "dataType": ["int"]},
-            {"name": "chunk_index",   "dataType": ["int"]},
-            {"name": "text_preview",  "dataType": ["text"]},
-        ],
+        vectorizer_config=Configure.Vectorizer.none(),
+        properties=_collection_properties(name),
     )
 
 
@@ -150,13 +173,18 @@ def upsert_chunks(
     and ``vector`` (list[float]). ``text_preview`` is truncated to 256 chars
     so the property doesn't dump entire chunks.
 
-    Returns the number of records written. Weaviate's ``insert`` is
+    Returns the number of records written. Weaviate's batch insert is
     upsert-by-uuid (UUID is the Weaviate primary id; ``uir_id`` is a
     BM25-indexed property used by retrieval-time queries).
+
+    Raises ``RuntimeError`` if the server rejected any object. The batch
+    API never raises on a per-object rejection -- it accumulates them on
+    ``batch.failed_objects`` -- so counting the ``add_object`` calls would
+    report chunks as stored that are in fact absent and unretrievable.
     """
     _ensure_collection(client, COLLECTION_CHUNKS)
     coll = client.collections.get(COLLECTION_CHUNKS)
-    written = 0
+    submitted = 0
     with coll.batch.dynamic() as batch:
         for rec in chunk_records:
             uuid_stripped = strip_uir_prefix(rec["uir_id"])
@@ -172,8 +200,16 @@ def upsert_chunks(
                 uuid=uuid_stripped,
                 vector=rec["vector"],
             )
-            written += 1
-    return written
+            submitted += 1
+
+    failed = list(coll.batch.failed_objects or ())
+    if failed:
+        sample = "; ".join(str(f.message) for f in failed[:3])
+        raise RuntimeError(
+            f"weaviate rejected {len(failed)}/{submitted} chunk objects "
+            f"for doc {doc_id}: {sample}"
+        )
+    return submitted
 
 
 def upsert_parent_doc(
@@ -183,20 +219,27 @@ def upsert_parent_doc(
     *,
     extra: dict[str, Any] | None = None,
 ) -> None:
-    """Upsert the document-level aggregate to ``UIRParentDoc_v1``."""
+    """Upsert the document-level aggregate to ``UIRParentDoc_v1``.
+
+    ``data.insert`` is insert-only -- it raises ``ObjectAlreadyExists`` on a
+    repeat uuid. Re-ingesting a document is routine (the doc id is derived
+    deterministically from the source URI), so we replace when the object is
+    already present. That makes this genuinely idempotent, matching
+    ``upsert_chunks``.
+    """
     _ensure_collection(client, COLLECTION_PARENT_DOCS)
     coll = client.collections.get(COLLECTION_PARENT_DOCS)
     extra = extra or {}
+    uuid = strip_uir_prefix(doc_id_uir)
     properties = {
         "uir_id": doc_id_uir,
         "page_count": int(extra.get("page_count", 0)),
         "chunk_count": int(extra.get("chunk_count", 0)),
     }
-    coll.data.insert(
-        uuid=strip_uir_prefix(doc_id_uir),
-        properties=properties,
-        vector=mean_vector,
-    )
+    if coll.data.exists(uuid):
+        coll.data.replace(uuid=uuid, properties=properties, vector=mean_vector)
+    else:
+        coll.data.insert(uuid=uuid, properties=properties, vector=mean_vector)
 
 
 def mean_pool_vectors(vectors: list[list[float]]) -> list[float]:

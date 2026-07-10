@@ -417,6 +417,32 @@ def _docling_to_table_draft(t: dict[str, Any]) -> Any:
     )
 
 
+def _is_weaviate_unavailable(exc: BaseException) -> bool:
+    """True iff ``exc`` means "no Weaviate server here", not "our code is wrong".
+
+    Used to decide whether the optional upsert stage may fail soft. Only
+    transport/startup conditions qualify. A schema mismatch or a rejected
+    object is a defect and must propagate.
+    """
+    if isinstance(exc, ImportError):  # weaviate-client not installed
+        return True
+    try:
+        from weaviate.exceptions import (
+            WeaviateConnectionError,
+            WeaviateGRPCUnavailableError,
+            WeaviateStartUpError,
+            WeaviateTimeoutError,
+        )
+    except ImportError:  # pragma: no cover -- client absent entirely
+        return True
+    return isinstance(exc, (
+        WeaviateConnectionError,
+        WeaviateGRPCUnavailableError,
+        WeaviateStartUpError,
+        WeaviateTimeoutError,
+    ))
+
+
 # ----------------------------------------------------------------------------
 # Public API
 # ----------------------------------------------------------------------------
@@ -1066,6 +1092,7 @@ def run(
 
         # Stage 11: optional Weaviate upsert
         if not skip_weaviate and not dry_run and vectors is not None and all_chunks:
+            client = None
             try:
                 from uir_pipeline.weaviate_store import get_client
                 client = get_client()
@@ -1086,7 +1113,22 @@ def run(
                 )
                 logger.info("weaviate upsert: %d chunks + 1 doc", len(chunk_nodes))
             except Exception as exc:
-                logger.warning("weaviate upsert failed: %s", exc)
+                # Fail-soft ONLY when the server isn't there: the CLI defaults
+                # to skip_weaviate=False, so a dev without `docker compose up`
+                # must still get their UIR JSON. Anything else -- a schema
+                # mismatch, a rejected object, a client-API break -- is a bug
+                # in us, and swallowing it silently loses the entire index.
+                if _is_weaviate_unavailable(exc):
+                    logger.warning("weaviate upsert skipped (server unavailable): %s", exc)
+                else:
+                    logger.error("weaviate upsert failed", exc_info=True)
+                    raise
+            finally:
+                if client is not None:
+                    try:
+                        client.close()
+                    except Exception:  # pragma: no cover -- best-effort cleanup
+                        pass
 
         _progress("done", 100)
         elapsed = time.monotonic() - t0
