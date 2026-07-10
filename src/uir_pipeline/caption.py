@@ -119,7 +119,9 @@ def _get_florence2(
                 pretrained_model_name_or_path=model_id,
             )
             if not hasattr(_florence_cfg_cls, "forced_bos_token_id"):
-                _florence_cfg_cls.forced_bos_token_id = None
+                # Loaded from the hub at runtime, so it is `type` to mypy and
+                # its real attributes are unknowable statically.
+                _florence_cfg_cls.forced_bos_token_id = None  # type: ignore[attr-defined]
                 logger.debug("applied Florence-2 compat shim: forced_bos_token_id=None")
         except Exception as exc:
             logger.debug("Florence-2 compat shim failed (load may still work): %s", exc)
@@ -129,9 +131,11 @@ def _get_florence2(
             model_id, device, getattr(dtype, "__name__", str(dtype)),
         )
         processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        # `.to(device)` is typed against torch's overloads, which don't model
+        # transformers' `PreTrainedModel.to(str)`.
         model = AutoModelForCausalLM.from_pretrained(
             model_id, torch_dtype=dtype, trust_remote_code=True,
-        ).to(device).eval()
+        ).to(device).eval()  # type: ignore[arg-type]
 
         # Some Florence-2 custom ops need the model on the device explicitly
         # before the processor's first call; ``generate`` validates this.

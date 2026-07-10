@@ -69,6 +69,9 @@ from flask import (
     send_file,
     session,
 )
+# Routes return `(body, status)` tuples as well as bare Responses; that
+# union is exactly what Flask calls a ResponseReturnValue.
+from flask.typing import ResponseReturnValue
 
 logger = logging.getLogger(__name__)
 
@@ -519,13 +522,14 @@ def create_app(
     _repo_root = _pkg_root.parent.parent
     data_dir = (Path(data_dir) if data_dir else (_repo_root / "data")).resolve()
     data_dir.mkdir(parents=True, exist_ok=True)
-    template_folder = str(template_folder or (_repo_root / "templates"))
-    static_folder = str(static_folder or (_repo_root / "static"))
+    # Distinct names: the parameters are `Path | None`, Flask wants `str`.
+    template_dir = str(template_folder or (_repo_root / "templates"))
+    static_dir = str(static_folder or (_repo_root / "static"))
 
     app = Flask(
         __name__,
-        template_folder=template_folder,
-        static_folder=static_folder,
+        template_folder=template_dir,
+        static_folder=static_dir,
     )
     app.config["MAX_CONTENT_LENGTH"] = max_upload_mb * 1024 * 1024
     app.config["UPLOAD_DIR"] = upload_dir
@@ -650,7 +654,18 @@ def create_app(
                     with jobs_lock:
                         job.stage_meta = dict(meta)
 
-            if execution == "process":
+            if job.upload_path is None:  # pragma: no cover -- set before dispatch
+                raise RuntimeError(f"job {job.job_id} has no upload path")
+
+            # Branch on the worker, not on `execution`: the worker is None
+            # exactly when execution == "thread", and this way the two can
+            # never disagree.
+            #
+            # The two branches return different types -- a SimpleNamespace
+            # rebuilt from the child's payload, or a real PipelineResult. Only
+            # the attributes read below are common to both.
+            result: Any
+            if worker is not None:
                 # Isolated: a SIGSEGV inside Docling costs this job only.
                 result = worker.run(
                     upload_path=job.upload_path,
@@ -815,11 +830,11 @@ def create_app(
     # -------- routes ----------------------------------------------------
 
     @app.get("/")
-    def index() -> Response:
+    def index() -> ResponseReturnValue:
         return render_template("console.html", max_upload_mb=max_upload_mb)
 
     @app.get("/api/health")
-    def health() -> Response:
+    def health() -> ResponseReturnValue:
         return jsonify({"ok": True, "upload_dir": str(upload_dir)})
 
     # -------- auth ------------------------------------------------------
@@ -829,7 +844,7 @@ def create_app(
         return body if isinstance(body, dict) else {}
 
     @app.post("/api/auth/signup")
-    def api_signup() -> Response:
+    def api_signup() -> ResponseReturnValue:
         from uir_pipeline.auth import AuthError
 
         body = _json_body()
@@ -847,7 +862,7 @@ def create_app(
         return jsonify({"user": user})
 
     @app.post("/api/auth/login")
-    def api_login() -> Response:
+    def api_login() -> ResponseReturnValue:
         from uir_pipeline.auth import AuthError, RateLimited
 
         body = _json_body()
@@ -867,12 +882,12 @@ def create_app(
         return jsonify({"user": user})
 
     @app.post("/api/auth/logout")
-    def api_logout() -> Response:
+    def api_logout() -> ResponseReturnValue:
         session.clear()
         return jsonify({"ok": True})
 
     @app.get("/api/auth/me")
-    def api_me() -> Response:
+    def api_me() -> ResponseReturnValue:
         user = _current_user()
         if user is None:
             return jsonify({"error": "not authenticated"}), 401
@@ -882,7 +897,7 @@ def create_app(
 
     @app.get("/api/jobs")
     @login_required
-    def api_jobs() -> Response:
+    def api_jobs() -> ResponseReturnValue:
         uid = request.user["id"]  # type: ignore[attr-defined]
         with jobs_lock:
             mine = [j.to_public() for j in jobs.values() if j.user_id == uid]
@@ -891,7 +906,7 @@ def create_app(
 
     @app.post("/api/run")
     @login_required
-    def api_run() -> Response:
+    def api_run() -> ResponseReturnValue:
         if "file" not in request.files:
             abort(400, description="missing 'file' field in multipart upload")
         upload = request.files["file"]
@@ -950,14 +965,14 @@ def create_app(
 
     @app.get("/api/status/<job_id>")
     @login_required
-    def api_status(job_id: str) -> Response:
+    def api_status(job_id: str) -> ResponseReturnValue:
         with jobs_lock:
             job = _owned_job(job_id)
             return jsonify(job.to_public())
 
     @app.get("/api/download/<job_id>")
     @login_required
-    def api_download(job_id: str) -> Response:
+    def api_download(job_id: str) -> ResponseReturnValue:
         with jobs_lock:
             job = _owned_job(job_id)
             if job.status != JOB_DONE or job.uir_path is None:
@@ -967,7 +982,7 @@ def create_app(
 
     @app.get("/api/result/<job_id>")
     @login_required
-    def api_result(job_id: str) -> Response:
+    def api_result(job_id: str) -> ResponseReturnValue:
         """Serve the (intent-filtered, if set) UIR document JSON inline.
 
         When the user submitted an optional ``intent`` form field on
@@ -991,7 +1006,7 @@ def create_app(
 
     @app.get("/api/umr/<job_id>")
     @login_required
-    def api_umr(job_id: str) -> Response:
+    def api_umr(job_id: str) -> ResponseReturnValue:
         """Serve the UMR Markdown companion file (Phase 17).
 
         When the user submitted an ``intent`` field, the narrowed
@@ -1034,7 +1049,7 @@ def create_app(
 
     @app.post("/api/chat")
     @login_required
-    def api_chat() -> Response:
+    def api_chat() -> ResponseReturnValue:
         """Answer a question grounded in the caller's converted documents.
 
         Retrieval spans every ``done`` job the caller owns, unless the
@@ -1102,7 +1117,7 @@ def create_app(
     @app.errorhandler(409)
     @app.errorhandler(413)
     @app.errorhandler(429)
-    def _handle_http_err(exc: Any) -> Response:
+    def _handle_http_err(exc: Any) -> ResponseReturnValue:
         return jsonify({"error": exc.description if hasattr(exc, "description") else str(exc)}), exc.code
 
     return app

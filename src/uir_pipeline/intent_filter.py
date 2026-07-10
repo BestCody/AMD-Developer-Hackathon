@@ -570,7 +570,9 @@ def filter_uirstream_by_intent(
                 # BM25-lite hit: chunk body / section title contains a
                 # keyword with measurable tf. Honest score + confident kind.
                 kind = "bm25-lite"
-                score_out: float = round(text_sc, 4)
+                # `| None` for the section-lift branch below, which means
+                # "no scoring signal" -- distinct from a BM25-lite score of 0.
+                score_out: float | None = round(text_sc, 4)
             else:
                 # Section-tree title lift pulled this chunk in but its
                 # own chunk-level section_path didn't fire _text_score.

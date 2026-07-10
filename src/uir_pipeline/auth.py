@@ -231,6 +231,8 @@ class UserStore:
                     "VALUES (?, ?, ?, ?)",
                     (email, (name or "").strip()[:120], pw_hash, now),
                 )
+                if cur.lastrowid is None:  # pragma: no cover -- INSERT always sets it
+                    raise AuthError("Could not create the account.")
                 user_id = int(cur.lastrowid)
         except sqlite3.IntegrityError as exc:
             # UNIQUE violation. This *does* disclose that the address is

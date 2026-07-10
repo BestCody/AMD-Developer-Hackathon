@@ -243,8 +243,11 @@ def build_umr(
 
     # Filtered-view banner: a single italic line so an agent reading the
     # UMR knows the document is narrowed.
+    # Test `intent_filter` directly in the guard (not a precomputed bool) so
+    # the body is narrowed to a non-None dict. `is_filtered` is still needed
+    # below, at the _render_children_recursive call.
     is_filtered = bool(intent_filter and intent_filter.get("matches"))
-    if is_filtered:
+    if intent_filter and is_filtered:
         intent_label = _coerce_str(
             intent_filter.get("intent"), default="(intent)",
         ).strip() or "(intent)"

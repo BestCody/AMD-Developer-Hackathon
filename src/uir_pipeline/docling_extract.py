@@ -573,10 +573,12 @@ def _walk_doc(doc: Any) -> DoclingResult:
         except Exception:  # noqa: BLE001
             bb = (0, 0, 0, 0)
         pg = _page_number(pi, fallback=1)
-        key = (pg, bb)
-        if key in seen_pic_keys or bb == (0, 0, 0, 0):
+        # Not `key`: the tables loop above binds that name to a
+        # (page, markdown) pair, and reusing it here reads as the same thing.
+        pic_key = (pg, bb)
+        if pic_key in seen_pic_keys or bb == (0, 0, 0, 0):
             continue
-        seen_pic_keys.add(key)
+        seen_pic_keys.add(pic_key)
         pictures.append({
             "page": pg,
             "bbox": bb,
