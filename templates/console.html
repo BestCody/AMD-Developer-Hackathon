@@ -30,9 +30,17 @@
 <script src="{{ url_for('static', filename='console/api.js') }}"></script>
 
 <style>
+  /* Global UI scale. The Aperture tokens are sized for a marketing page
+     (17px body, 34px headings); in a dense app console that reads oversized.
+     `zoom` shrinks type, spacing, icons and the rail uniformly -- something
+     no token override can do, since much of the layout is hardcoded px in
+     JSX. Chromium-only, which is what this console targets. The legacy
+     `zoom` property does not accept var(), so the factor is a literal; the
+     full-height rule divides 100vh by the same 0.75 so the app still fills
+     the screen after zoom instead of leaving a gap at the bottom. */
   html, body, #root { height: 100%; }
-  body { margin: 0; background: var(--surface-canvas); }
-  .console { display: flex; height: 100vh; }
+  body { margin: 0; background: var(--surface-canvas); zoom: 0.75; }
+  .console { display: flex; height: calc(100vh / 0.75); }
 
   @keyframes ap-spin { to { transform: rotate(360deg); } }
   .ap-spin { animation: ap-spin 0.9s linear infinite; }

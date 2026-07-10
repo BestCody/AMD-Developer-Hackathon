@@ -1,4 +1,4 @@
-/* IconRail.jsx -- left rail: Upload / Copilot, plus the signed-in user.
+/* IconRail.jsx -- left rail: Upload / Gemini, plus the signed-in user.
  *
  * The design kit's rail had a third "Profile → Chats" tab backed by a
  * hardcoded list of fictional conversations ("Priya Shah", "Marcus Lee").
@@ -13,7 +13,7 @@
 function IconRail({ active, onChange, user, onLogout }) {
   const items = [
     { id: "upload", label: "Upload", icon: "upload-cloud" },
-    { id: "copilot", label: "Copilot", icon: "sparkles" },
+    { id: "gemini", label: "Gemini", icon: "sparkles" },
   ];
 
   React.useEffect(() => {

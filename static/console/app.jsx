@@ -17,7 +17,7 @@
 
 const IconRail = window.ConsoleIconRail;
 const UploadStage = window.ConsoleUploadStage;
-const CopilotChat = window.ConsoleCopilotChat;
+const GeminiChat = window.ConsoleGeminiChat;
 const ChatsPanel = window.ConsoleChatsPanel;
 const LoginScreen = window.ConsoleLoginScreen;
 const SignUpScreen = window.ConsoleSignUpScreen;
@@ -158,7 +158,7 @@ function App() {
           onDeleteFile={deleteFile}
         />
       )}
-      {tab === "copilot" && <CopilotChat files={files} />}
+      {tab === "gemini" && <GeminiChat files={files} />}
       {tab === "chats" && <ChatsPanel user={user} />}
     </div>
   );

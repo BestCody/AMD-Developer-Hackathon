@@ -65,6 +65,31 @@ function ConvertingAnimation({ file }) {
   );
 }
 
+function ConversionSuccess({ file }) {
+  return (
+    <div style={{ textAlign: "center" }} role="status" aria-live="polite">
+      <div
+        className="ap-badge-pop"
+        style={{
+          width: 64, height: 64, margin: "0 auto 16px",
+          borderRadius: "var(--radius-full)",
+          background: "var(--status-success-bg)",
+          color: "var(--status-success)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}
+      >
+        <i data-lucide="check" style={{ width: 28, height: 28 }}></i>
+      </div>
+      <div style={{ fontFamily: "var(--font-display)", fontSize: "var(--text-tagline-size)", fontWeight: 600, color: "var(--text-ink)" }}>
+        {file.name}
+      </div>
+      <div style={{ fontSize: "var(--text-caption-size)", color: "var(--text-muted-48)", marginTop: 4 }}>
+        Converted to UIR · ready for your agent to query
+      </div>
+    </div>
+  );
+}
+
 function FileIcon({ file, selected, onClick, onDelete }) {
   return (
     <button onClick={onClick} className="ap-file-icon" style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6, border: "none", background: "transparent", cursor: "pointer", padding: 4 }}>
@@ -115,14 +140,42 @@ function FileIcon({ file, selected, onClick, onDelete }) {
 function UploadStage({ files, selectedId, onSelectFile, onAddFiles, onDeleteFile }) {
   const [dragging, setDragging] = React.useState(false);
   const [folderWidth, setFolderWidth] = React.useState(240);
+  const [successId, setSuccessId] = React.useState(null);
   const resizing = React.useRef(false);
   const inputRef = React.useRef(null);
+  const previousStatuses = React.useRef(new Map());
+  const successTimer = React.useRef(null);
 
   const hasFiles = files.length > 0;
   const selected = files.find((f) => f.id === selectedId) || null;
   const maxMb = (window.MONADLABS_CONFIG && window.MONADLABS_CONFIG.maxUploadMb) || 64;
 
   React.useEffect(() => { if (window.lucide) window.lucide.createIcons(); });
+
+  // Show the centered checkmark only when a live conversion changes from
+  // processing to done. Rehydrated documents and later file clicks open the
+  // result viewer normally instead of replaying the success animation.
+  React.useEffect(() => {
+    const completed = files.find(
+      (file) => file.status === "done" && previousStatuses.current.get(file.id) === "processing"
+    );
+    previousStatuses.current = new Map(files.map((file) => [file.id, file.status]));
+
+    if (!completed) return;
+
+    if (successTimer.current) window.clearTimeout(successTimer.current);
+    setSuccessId(completed.id);
+    onSelectFile(completed.id);
+    successTimer.current = window.setTimeout(() => {
+      setSuccessId(null);
+      onSelectFile(null);
+      successTimer.current = null;
+    }, 1800);
+  }, [files, onSelectFile]);
+
+  React.useEffect(() => () => {
+    if (successTimer.current) window.clearTimeout(successTimer.current);
+  }, []);
 
   React.useEffect(() => {
     function onMove(e) {
@@ -225,7 +278,13 @@ function UploadStage({ files, selectedId, onSelectFile, onAddFiles, onDeleteFile
           </div>
         )}
 
-        {selected && selected.status === "done" && <window.ConsoleResultViewer job={selected.job} />}
+        {selected && selected.status === "done" && successId === selected.id && (
+          <ConversionSuccess file={selected} />
+        )}
+
+        {selected && selected.status === "done" && successId !== selected.id && (
+          <window.ConsoleResultViewer job={selected.job} />
+        )}
       </div>
 
       {hasFiles && (

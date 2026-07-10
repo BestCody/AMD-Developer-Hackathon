@@ -55,7 +55,7 @@ function Citations({ items }) {
   );
 }
 
-function CopilotChat({ files }) {
+function GeminiChat({ files }) {
   const converted = files.filter((f) => f.status === "done");
   const [messages, setMessages] = React.useState([]);
   const [draft, setDraft] = React.useState("");
@@ -103,7 +103,7 @@ function CopilotChat({ files }) {
     <div style={{ display: "flex", flexDirection: "column", height: "100%", maxWidth: 760, margin: "0 auto", width: "100%" }}>
       <div style={{ padding: "32px 8px 12px", display: "flex", alignItems: "center", gap: 12 }}>
         <div style={{ fontFamily: "var(--font-display)", fontSize: "var(--text-display-md-size)", fontWeight: 600, letterSpacing: "var(--text-display-md-tracking)", color: "var(--text-ink)" }}>
-          Copilot
+          Gemini
         </div>
         <Badge kind={converted.length ? "success" : "neutral"}>
           {converted.length} document{converted.length === 1 ? "" : "s"} indexed
@@ -189,6 +189,6 @@ function CopilotChat({ files }) {
   );
 }
 
-window.ConsoleCopilotChat = CopilotChat;
+window.ConsoleGeminiChat = GeminiChat;
 
 })();
