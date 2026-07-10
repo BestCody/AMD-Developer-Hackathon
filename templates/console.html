@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MonadLabs Console</title>
+<link rel="icon" href="{{ url_for('static', filename='ds/assets/logo/aperture-mark.png') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='ds/styles.css') }}">
+
+<!--
+  React + Babel are loaded from a CDN and JSX is transpiled in the browser.
+  That is a prototype-grade setup inherited from the design kit: it
+  keeps this Python repo free of a Node toolchain, at the cost of a ~3 MB
+  download and a transpile on every page load. If this ever ships beyond a
+  LAN demo, precompile the JSX and drop these three tags.
+-->
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/lucide@0.462.0"></script>
+
+<!-- Vendored design-system primitives (Button, Dialog, Tabs, Badge, ...).
+     The bundle's `window.ApertureDesignSystem_0a9afd` global keeps its
+     generated name on purpose: it is emitted by the design compiler in
+     Frontend/, and renaming our copy would break the console the moment
+     anyone regenerates it. Brand naming lives in the markup, not here. -->
+
+<script src="{{ url_for('static', filename='ds/ds-primitives.js') }}"></script>
+<!-- Plain-JS API client; no JSX, so no Babel pass. -->
+<script src="{{ url_for('static', filename='console/api.js') }}"></script>
+
+<style>
+  html, body, #root { height: 100%; }
+  body { margin: 0; background: var(--surface-canvas); }
+  .console { display: flex; height: 100vh; }
+
+  @keyframes ap-spin { to { transform: rotate(360deg); } }
+  .ap-spin { animation: ap-spin 0.9s linear infinite; }
+
+  @keyframes ap-badge-pop {
+    0% { transform: scale(0); opacity: 0; }
+    60% { transform: scale(1.25); opacity: 1; }
+    100% { transform: scale(1); opacity: 1; }
+  }
+  .ap-badge-pop { animation: ap-badge-pop 0.5s cubic-bezier(0.22, 0.61, 0.36, 1) both; }
+
+  .ap-ring { position: absolute; inset: 0; border-radius: 50%; border: 2px solid transparent; }
+  .ap-ring--1 { border-top-color: var(--accent-primary); animation: ap-spin 1.6s linear infinite; }
+  .ap-ring--2 { inset: 12px; border-top-color: var(--accent-primary-on-dark); opacity: 0.6; animation: ap-spin 1.1s linear infinite reverse; }
+  .ap-ring--3 { inset: 24px; border-top-color: var(--gray-150); animation: ap-spin 2.2s linear infinite; }
+
+  .ap-file-delete { opacity: 0; transform: scale(0.85); transition: opacity var(--duration-fast) ease, transform var(--duration-fast) ease; }
+  .ap-file-icon:hover .ap-file-delete { opacity: 1; transform: scale(1); }
+
+  .ap-cite { font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+  // Server-injected config. Keep this the only channel from Flask into the
+  // SPA -- anything else invites template/JS coupling that breaks silently.
+  window.MONADLABS_CONFIG = { maxUploadMb: {{ max_upload_mb | tojson }} };
+</script>
+
+<script type="text/babel" data-presets="react" src="{{ url_for('static', filename='console/AuthScreens.jsx') }}"></script>
+<script type="text/babel" data-presets="react" src="{{ url_for('static', filename='console/IconRail.jsx') }}"></script>
+<script type="text/babel" data-presets="react" src="{{ url_for('static', filename='console/ResultViewer.jsx') }}"></script>
+<script type="text/babel" data-presets="react" src="{{ url_for('static', filename='console/UploadStage.jsx') }}"></script>
+<script type="text/babel" data-presets="react" src="{{ url_for('static', filename='console/CopilotChat.jsx') }}"></script>
+<script type="text/babel" data-presets="react" src="{{ url_for('static', filename='console/app.jsx') }}"></script>
+</body>
+</html>

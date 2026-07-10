@@ -118,13 +118,35 @@ def fake_run(monkeypatch):
 
 
 @pytest.fixture()
-def client(tmp_path, fake_run):
+def client(tmp_path, fake_run, monkeypatch):
+    """A *signed-in* test client.
+
+    Every job route now requires a session (see ``uir_pipeline.auth``), so
+    the fixture registers a throwaway account and returns the client holding
+    its cookie. The tests below exercise pipeline behaviour, not the auth
+    boundary -- that lives in ``tests/test_web_auth.py``.
+
+    ``data_dir`` is pinned to ``tmp_path`` so the SQLite user table and the
+    generated ``.secret_key`` never land in the real repo's ``data/``.
+    """
+    monkeypatch.setenv("SECRET_KEY", "test-secret-not-random")
     app = create_app(
         upload_dir=tmp_path / "uploads",
         output_dir=tmp_path / "outputs",
+        data_dir=tmp_path / "data",
+        # in-process: these tests monkeypatch pipeline.run, which a spawned
+        # child process cannot inherit. Crash isolation is covered in
+        # tests/test_web_isolation.py.
+        execution="thread",
     )
     app.config["TESTING"] = True
-    return app.test_client()
+    c = app.test_client()
+    resp = c.post(
+        "/api/auth/signup",
+        json={"email": "tester@example.com", "password": "test-password-123", "name": "Tester"},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    return c
 
 
 # ----------------------------------------------------------------------------
@@ -138,10 +160,11 @@ def test_health(client):
 
 
 def test_index_renders(client):
+    """``/`` now serves the MonadLabs console SPA, not the old tester page."""
     resp = client.get("/")
     assert resp.status_code == 200
-    assert b"UIR Pipeline" in resp.data
-    assert b"Run pipeline" in resp.data
+    assert b"MonadLabs Console" in resp.data
+    assert b"console/app.jsx" in resp.data
 
 
 def test_run_rejects_missing_file(client):
@@ -405,12 +428,11 @@ def test_status_endpoint_reflects_allowlisted_stage_meta(client):
     """Job.stage_meta propagated via /api/status reflects the allowlist filter."""
     jid = "filter-test"
     import uir_pipeline.web as web_mod
-    captured_jobs = web_mod.create_app(upload_dir=None, output_dir=None)
-    # Inject a fake job with mixed keys; check /api/status <id>.
-    with captured_jobs.test_request_context() if hasattr(captured_jobs, "test_request_context") else captured_jobs.test_client():
-        # Drop into the closure-local jobs dict via the public app.
-        pass
-    # Simpler: assert the to_public contract via Job.to_public directly.
+    # NOTE: this test asserts the ``Job.to_public`` allowlist directly; it
+    # never needed an app. Building one here used to be harmless, but
+    # ``create_app`` now provisions a SQLite user store and a secret key,
+    # so instantiating it with default paths would write into the repo's
+    # real ``data/`` directory during a test run.
     job = web_mod.Job(job_id=jid, stage_meta={
         "caption_records_total": 5,
         "caption_records_with_text": 5,

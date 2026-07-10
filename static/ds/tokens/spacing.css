@@ -1,0 +1,25 @@
+/* ==========================================================================
+   Aperture — Spacing & radius tokens (verbatim from DESIGN-apple.md)
+   ========================================================================== */
+
+:root {
+  --space-xxs: 4px;
+  --space-xs: 8px;
+  --space-sm: 12px;
+  --space-md: 17px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-xxl: 48px;
+  --space-section: 80px;
+
+  --radius-none: 0px;
+  --radius-xs: 5px;
+  --radius-sm: 8px;
+  --radius-md: 11px;
+  --radius-lg: 18px;
+  --radius-pill: 9999px;
+  --radius-full: 9999px;
+
+  --container-max: 1440px;
+  --container-text-max: 980px;
+}

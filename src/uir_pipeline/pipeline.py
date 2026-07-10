@@ -216,7 +216,7 @@ def run(
         A :class:`PipelineResult` with :attr:`PipelineResult.umr_path`
         populated (the companion ``.umr.md`` file is always written
         alongside ``.uir.json`` so agents have the same view that
-        :file:`templates/index.html` surfaces).
+        :file:`templates/console.html` surfaces).
     """
     t0 = time.monotonic()
     p = Path(input_path)
@@ -724,7 +724,11 @@ def run(
         if not dry_run:
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path = out_dir / f"{doc_id}.uir.json"
-            out_path.write_text(uir.model_dump_json(indent=2))
+            # encoding= is mandatory: Path.write_text() defaults to the
+            # locale encoding, which is cp1252 on Windows. Any non-latin1
+            # glyph in an extracted document (curly quotes, CJK, "·") then
+            # either mangles or raises UnicodeEncodeError.
+            out_path.write_text(uir.model_dump_json(indent=2), encoding="utf-8")
         else:
             out_path = out_dir / f"{doc_id}.uir.json"  # virtual
         # UMR is rendered from the in-memory UIRV1 (not the just-written
@@ -740,7 +744,7 @@ def run(
             # model) so the renderer can be unit-tested independently.
             umr_text = build_umr(json.loads(uir.model_dump_json()))
             if not dry_run:
-                umr_path.write_text(umr_text)
+                umr_path.write_text(umr_text, encoding="utf-8")
         except Exception as exc:
             # UMR rendering is best-effort: if it fails we log and emit a
             # minimal placeholder so downstream consumers can still
@@ -749,7 +753,8 @@ def run(
             logger.warning("UMR render failed (fail-soft): %s", exc)
             if not dry_run:
                 umr_path.write_text(
-                    f"# UMR render failed\n\n_Exception:_ `{exc}`\n"
+                    f"# UMR render failed\n\n_Exception:_ `{exc}`\n",
+                    encoding="utf-8",
                 )
 
         # Stage 11: optional Weaviate upsert

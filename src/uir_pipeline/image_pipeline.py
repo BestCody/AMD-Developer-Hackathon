@@ -329,8 +329,8 @@ def run_image_pipeline(
 
     if not dry_run:
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(uir_dict, indent=2))
-        umr_path.write_text(umr_text)
+        out_path.write_text(json.dumps(uir_dict, indent=2), encoding="utf-8")
+        umr_path.write_text(umr_text, encoding="utf-8")
         logger.info("wrote %s and %s", out_path.name, umr_path.name)
     else:
         logger.info("dry-run: would write %s and %s", out_path.name, umr_path.name)

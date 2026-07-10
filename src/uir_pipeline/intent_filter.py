@@ -422,7 +422,7 @@ def filter_uirstream_by_intent(
     if out_path is not None:
         out_path = Path(out_path)
     keywords = _intent_keywords(intent)
-    src = json.loads(uir_path.read_text())
+    src = json.loads(uir_path.read_text(encoding="utf-8"))
     root = src.get("structure", {}).get("root", {})
 
     # Compute document-average chunk length once so _text_score stays O(1)
@@ -660,7 +660,7 @@ def filter_uirstream_by_intent(
         target = uir_path.parent / (uir_path.stem + ".intent" + uir_path.suffix)
     else:
         target = out_path
-    target.write_text(json.dumps(new_src, indent=2))
+    target.write_text(json.dumps(new_src, indent=2), encoding="utf-8")
 
     return {
         "intent": intent,

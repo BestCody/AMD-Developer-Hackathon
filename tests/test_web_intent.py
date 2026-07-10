@@ -104,14 +104,18 @@ def fake_run_intent(monkeypatch, tmp_path: Path):
     UIR and the intent-filter module is exercised on it."""
     calls: list[dict] = []
 
+    # ``intent`` was added to the real ``pipeline.run`` signature and web.py
+    # has been passing it, but this stub never grew the parameter -- these
+    # four tests were failing with TypeError before the console work began.
     def _fake(input_path, output_dir, *, skip_weaviate=False, dry_run=False,
               with_embeddings=True, on_progress=None, page_numbers=None,
-              fast_path=None):
+              fast_path=None, intent=None):
         calls.append({
             "input_path": str(input_path),
             "skip_weaviate": skip_weaviate,
             "with_embeddings": with_embeddings,
             "fast_path": fast_path,
+            "intent": intent,
         })
         for stage, pct in [
             ("ingest", 5), ("extract_text", 20), ("synthesize_ocr", 30),
@@ -140,13 +144,26 @@ def fake_run_intent(monkeypatch, tmp_path: Path):
 
 
 @pytest.fixture()
-def client_intent(tmp_path: Path, fake_run_intent):
+def client_intent(tmp_path: Path, fake_run_intent, monkeypatch):
+    """A signed-in client. ``/api/run`` requires a session; see test_web_auth.py."""
+    monkeypatch.setenv("SECRET_KEY", "test-secret-not-random")
     app = create_app(
         upload_dir=tmp_path / "uploads",
         output_dir=tmp_path / "outputs",
+        data_dir=tmp_path / "data",
+        # in-process: these tests monkeypatch pipeline.run, which a spawned
+        # child process cannot inherit. Crash isolation is covered in
+        # tests/test_web_isolation.py.
+        execution="thread",
     )
     app.config["TESTING"] = True
-    return app.test_client()
+    c = app.test_client()
+    resp = c.post(
+        "/api/auth/signup",
+        json={"email": "tester@example.com", "password": "test-password-123"},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    return c
 
 
 def _wait_for_done(client, job_id: str, timeout_s: float = 5.0) -> dict:

@@ -1,0 +1,75 @@
+/* ==========================================================================
+   Aperture — Color tokens
+   Base palette lifted 1:1 from DESIGN-apple.md, renamed to Aperture's own
+   semantic layer. Single-accent system: one "Focus Blue" carries every
+   interactive affordance, exactly as in the source. No second brand hue.
+   ========================================================================== */
+
+:root {
+  /* ---- Base hues (Apple source values, kept exact) -------------------- */
+  --blue-50: #eef6ff;
+  --blue-100: #d8ebff;
+  --blue-300: #6ea8ff;
+  --blue-500: #0066cc;   /* Action Blue — the single accent */
+  --blue-600: #0071e3;   /* Focus Blue — focus ring / hover */
+  --blue-400-dark: #2997ff; /* Sky Link Blue — links on dark surfaces */
+
+  --gray-1000: #000000;
+  --gray-950: #1d1d1f;   /* Ink */
+  --gray-900: #252527;   /* tile dark 3 */
+  --gray-880: #272729;   /* tile dark 1 */
+  --gray-860: #2a2a2c;   /* tile dark 2 */
+  --gray-700: #333333;
+  --gray-500: #7a7a7a;
+  --gray-300: #cccccc;
+  --gray-200: #e0e0e0;
+  --gray-150: #d2d2d7;
+  --gray-100: #f0f0f0;
+  --gray-50: #f5f5f7;    /* Parchment */
+  --gray-25: #fafafc;    /* Pearl */
+  --white: #ffffff;
+
+  /* ---- Semantic surfaces ------------------------------------------------ */
+  --surface-canvas: var(--white);
+  --surface-parchment: var(--gray-50);
+  --surface-pearl: var(--gray-25);
+  --surface-black: var(--gray-1000);
+  --surface-tile-1: var(--gray-880);
+  --surface-tile-2: var(--gray-860);
+  --surface-tile-3: var(--gray-900);
+  --surface-chip-translucent: rgba(210, 210, 215, 0.64);
+
+  /* ---- Semantic text ----------------------------------------------------- */
+  --text-ink: var(--gray-950);
+  --text-body: var(--gray-950);
+  --text-on-dark: var(--white);
+  --text-muted-on-dark: var(--gray-300);
+  --text-muted-80: var(--gray-700);
+  --text-muted-48: var(--gray-500);
+
+  /* ---- Interactive ------------------------------------------------------- */
+  --accent-primary: var(--blue-500);
+  --accent-primary-focus: var(--blue-600);
+  --accent-primary-on-dark: var(--blue-400-dark);
+  --on-accent: var(--white);
+
+  /* ---- Semantic feedback (Aperture addition — not in Apple source;
+     needed for pipeline status the source has no equivalent for) ------- */
+  --status-success: #1d8a4a;
+  --status-success-bg: #eaf7ef;
+  --status-warning: #b5680a;
+  --status-warning-bg: #fdf3e3;
+  --status-error: #d92d20;
+  --status-error-bg: #fdece9;
+  --status-processing: var(--accent-primary);
+  --status-processing-bg: var(--blue-50);
+
+  /* ---- Hairlines / borders ------------------------------------------------ */
+  --border-hairline: var(--gray-200);
+  --border-soft: rgba(0, 0, 0, 0.08);
+  --border-divider-soft: var(--gray-100);
+
+  /* ---- Elevation (the one true shadow, plus a hairline ring) ------------ */
+  --shadow-product: 3px 5px 30px 0 rgba(0, 0, 0, 0.22);
+  --shadow-ring: 0 0 0 1px var(--border-soft);
+}
