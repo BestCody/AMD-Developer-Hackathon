@@ -88,7 +88,10 @@ _DOCLING_EXTENSIONS: Final[frozenset[str]] = frozenset({
     ".epub",               # e-book
     ".html", ".htm",       # web
     ".tex",                # LaTeX source
-    ".ipynb",              # Jupyter notebook
+    # NOT ``.ipynb``: DocumentConverter's allow-list carries no notebook
+    # format, so it failed with "File format not allowed: x.ipynb". A
+    # notebook is JSON, so the TEXT route reads its cells directly.
+    # See ``pipeline._notebook_to_text``.
 })
 
 # Plain-text / code / structured-data formats that have no "page"
@@ -97,6 +100,9 @@ _TEXT_EXTENSIONS: Final[frozenset[str]] = frozenset({
     ".txt", ".md", ".markdown",
     ".csv", ".tsv",
     ".rtf",
+    # Docling's allow-list has no notebook format, so this reads the JSON and
+    # concatenates the cells (``pipeline._notebook_to_text``).
+    ".ipynb",
     # Common source code / config extensions; treated as plain text.
     ".py", ".pyi", ".pyx",
     ".js", ".jsx", ".mjs", ".cjs",
@@ -227,7 +233,7 @@ def classify_route(format_str: str) -> FormatRoute:
         # ``DocumentConverter`` accepts PPTX natively), so the order
         # matters -- this branch must run first or it is dead code.
         return FormatRoute.PPTX_NATIVE
-    if fs in _DOCLING_EXTENSIONS_LABELS or fs in {"DOCX", "XLSX", "EPUB", "HTML", "TEX", "IPYNB"}:
+    if fs in _DOCLING_EXTENSIONS_LABELS or fs in {"DOCX", "XLSX", "EPUB", "HTML", "TEX"}:
         return FormatRoute.DOCLING
     if fs == "IMAGE" or fs in {e.lstrip(".").upper() for e in _IMAGE_EXTENSIONS}:
         return FormatRoute.IMAGE

@@ -322,3 +322,125 @@ def test_unknown_text_extension_still_gets_a_mime(tmp_path):
     p = tmp_path / "mod.py"
     p.write_text("x = 1\n", encoding="utf-8")
     assert ingest_any(p).mime_type
+
+
+# ---------------------------------------------------------------------------
+# Jupyter notebooks
+# ---------------------------------------------------------------------------
+# format_router routed .ipynb to DOCLING, whose allow-list has no notebook
+# format: "File format not allowed: n.ipynb". It is JSON, so the text route
+# reads its cells.
+
+def _write_nb(path, cells):
+    import json as _json
+
+    nb = {"cells": cells, "metadata": {"kernelspec": {"language": "python"}},
+          "nbformat": 4, "nbformat_minor": 5}
+    path.write_text(_json.dumps(nb), encoding="utf-8")
+    return path
+
+
+def test_ipynb_takes_the_text_route():
+    from uir_pipeline.format_router import FormatRoute, classify_route
+
+    assert classify_route("IPYNB") is FormatRoute.TEXT
+
+
+def test_ipynb_stays_in_supported_extensions():
+    from uir_pipeline.format_router import SUPPORTED_EXTENSIONS
+
+    assert ".ipynb" in SUPPORTED_EXTENSIONS
+
+
+def test_notebook_to_text_keeps_prose_and_fences_code(tmp_path):
+    from uir_pipeline.pipeline import _notebook_to_text
+
+    p = _write_nb(tmp_path / "n.ipynb", [
+        {"cell_type": "markdown", "source": ["# Title\n", "\n", "Prose here."]},
+        {"cell_type": "code", "source": ["print(1)\n"], "outputs": [], "execution_count": 1},
+    ])
+    text = _notebook_to_text(p)
+    assert "# Title" in text and "Prose here." in text
+    assert "```python\nprint(1)\n```" in text
+
+
+def test_notebook_to_text_drops_outputs_and_json_noise(tmp_path):
+    """Outputs are often megabytes of base64 PNG; they are not the document."""
+    from uir_pipeline.pipeline import _notebook_to_text
+
+    p = _write_nb(tmp_path / "n.ipynb", [
+        {"cell_type": "code", "source": ["plot()"], "execution_count": 2,
+         "outputs": [{"data": {"image/png": "iVBORw0KGgoAAAANSUhEUg"}}]},
+    ])
+    text = _notebook_to_text(p)
+    assert "iVBORw0KGgo" not in text
+    assert "cell_type" not in text and "execution_count" not in text
+
+
+def test_notebook_source_may_be_a_string_not_a_list(tmp_path):
+    """nbformat allows either; a bare string must not be iterated per-character."""
+    from uir_pipeline.pipeline import _notebook_to_text
+
+    p = _write_nb(tmp_path / "n.ipynb", [
+        {"cell_type": "markdown", "source": "One string body."},
+    ])
+    assert _notebook_to_text(p).strip() == "One string body."
+
+
+def test_notebook_skips_empty_cells(tmp_path):
+    from uir_pipeline.pipeline import _notebook_to_text
+
+    p = _write_nb(tmp_path / "n.ipynb", [
+        {"cell_type": "markdown", "source": ["   \n"]},
+        {"cell_type": "markdown", "source": ["kept"]},
+    ])
+    assert _notebook_to_text(p).strip() == "kept"
+
+
+def test_malformed_notebook_raises_a_clear_error(tmp_path):
+    from uir_pipeline.pipeline import _notebook_to_text
+
+    p = tmp_path / "bad.ipynb"
+    p.write_text("{not json", encoding="utf-8")
+    with pytest.raises(ValueError, match="not valid notebook JSON"):
+        _notebook_to_text(p)
+
+
+def test_text_route_reads_a_notebook(tmp_path):
+    from uir_pipeline.pipeline import _run_text_route
+
+    p = _write_nb(tmp_path / "n.ipynb", [
+        {"cell_type": "markdown", "source": ["# Analysis"]},
+        {"cell_type": "code", "source": ["x = 1"], "outputs": []},
+    ])
+    regions, _ = _run_text_route(p, "IPYNB")
+    texts = [r.text for r in regions]
+    assert "# Analysis" in texts
+    assert any(t.startswith("```python") for t in texts)
+
+
+# ---------------------------------------------------------------------------
+# Fence-aware paragraph splitting
+# ---------------------------------------------------------------------------
+
+def test_split_paragraphs_does_not_tear_a_fenced_block():
+    """A code block with a blank line inside must stay whole."""
+    from uir_pipeline.pipeline import _split_paragraphs
+
+    text = "Intro.\n\n```python\na = 1\n\nb = 2\n```\n\nOutro."
+    blocks = _split_paragraphs(text)
+    assert blocks == ["Intro.", "```python\na = 1\n\nb = 2\n```", "Outro."]
+    assert all(b.count("```") % 2 == 0 for b in blocks), "unterminated fence"
+
+
+def test_split_paragraphs_on_plain_prose():
+    from uir_pipeline.pipeline import _split_paragraphs
+
+    assert _split_paragraphs("one\n\ntwo\n\n\n\nthree") == ["one", "two", "three"]
+
+
+def test_split_paragraphs_ignores_blank_input():
+    from uir_pipeline.pipeline import _split_paragraphs
+
+    assert _split_paragraphs("") == []
+    assert _split_paragraphs("\n\n   \n") == []

@@ -184,6 +184,77 @@ def _read_text_file(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def _split_paragraphs(text: str) -> list[str]:
+    """Split on blank lines, but never inside a ``` fenced block.
+
+    A markdown or notebook code block routinely contains blank lines. A naive
+    ``re.split(r"\\n\\s*\\n", ...)`` tears it in half, leaving an unterminated
+    fence in one chunk and an orphan ``` in the next.
+    """
+    paragraphs: list[str] = []
+    current: list[str] = []
+    in_fence = False
+
+    def _flush() -> None:
+        block = "\n".join(current).strip()
+        if block:
+            paragraphs.append(block)
+        current.clear()
+
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            current.append(line)
+            if not in_fence:  # closing fence ends the block
+                _flush()
+            continue
+        if not in_fence and not line.strip():
+            _flush()
+            continue
+        current.append(line)
+    _flush()
+    return paragraphs
+
+
+def _notebook_to_text(path: Path) -> str:
+    """Flatten a Jupyter notebook into prose + fenced code.
+
+    Docling's allow-list carries no notebook format, so `.ipynb` used to fail
+    with "File format not allowed". It is JSON, but dumping the JSON would bury
+    the prose under `"cell_type"` / `"metadata"` noise and embed base64 image
+    outputs in the embeddings.
+
+    Markdown cells pass through as-is. Code cells become fenced blocks so the
+    chunker keeps them whole. Outputs are dropped: they are often megabytes of
+    base64 PNG, and an execution result is not part of the document's meaning.
+    """
+    try:
+        nb = json.loads(_read_text_file(path))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{path.name} is not valid notebook JSON: {exc}") from exc
+
+    lang = (
+        (nb.get("metadata") or {}).get("kernelspec", {}).get("language")
+        or "python"
+    )
+    blocks: list[str] = []
+    for cell in nb.get("cells") or []:
+        source = cell.get("source") or []
+        # nbformat stores source as a list of lines *or* a single string.
+        text = ("".join(source) if isinstance(source, list) else str(source)).strip()
+        if not text:
+            continue
+        kind = cell.get("cell_type")
+        if kind == "markdown":
+            blocks.append(text)
+        elif kind == "code":
+            blocks.append(f"```{lang}\n{text}\n```")
+        # raw cells carry no rendering semantics; keep their text verbatim.
+        elif kind == "raw":
+            blocks.append(text)
+    return "\n\n".join(blocks)
+
+
 def _run_text_route(path: Path, fmt: str) -> tuple[list[Any], list[tuple[int, str]]]:
     """The pageless route: read -> paginate -> regions. No Docling.
 
@@ -203,21 +274,21 @@ def _run_text_route(path: Path, fmt: str) -> tuple[list[Any], list[tuple[int, st
     from uir_pipeline.chunk import paginate_pageless
     from uir_pipeline.layout import LayoutLabel, LayoutRegion
 
-    if fmt.upper() == "RTF":
+    fmt_upper = fmt.upper()
+    if fmt_upper == "RTF":
         # striprtf decodes the control words; it also paginates for us.
         from uir_pipeline.ingest_rtf import ingest_rtf
 
         _doc, page_pairs = ingest_rtf(path)
+    elif fmt_upper == "IPYNB":
+        page_pairs = paginate_pageless(_notebook_to_text(path))
     else:
         page_pairs = paginate_pageless(_read_text_file(path))
 
     regions: list[Any] = []
     order = 0
     for page_no, page_text in page_pairs:
-        for para in re.split(r"\n\s*\n", page_text):
-            para = para.strip()
-            if not para:
-                continue
+        for para in _split_paragraphs(page_text):
             order += 1
             regions.append(LayoutRegion(
                 label=LayoutLabel.PARAGRAPH,
