@@ -115,7 +115,6 @@ function FileIcon({ file, selected, onClick, onDelete }) {
 function UploadStage({ files, selectedId, onSelectFile, onAddFiles, onDeleteFile }) {
   const [dragging, setDragging] = React.useState(false);
   const [folderWidth, setFolderWidth] = React.useState(240);
-  const [intent, setIntent] = React.useState("");
   const resizing = React.useRef(false);
   const inputRef = React.useRef(null);
 
@@ -153,7 +152,7 @@ function UploadStage({ files, selectedId, onSelectFile, onAddFiles, onDeleteFile
   // These two are the whole point: hand the actual FileList upward.
   function handleInputChange(e) {
     const picked = Array.from(e.target.files || []);
-    if (picked.length) onAddFiles(picked, intent);
+    if (picked.length) onAddFiles(picked);
     e.target.value = ""; // let the same file be re-picked
   }
 
@@ -161,7 +160,7 @@ function UploadStage({ files, selectedId, onSelectFile, onAddFiles, onDeleteFile
     e.preventDefault();
     setDragging(false);
     const dropped = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
-    if (dropped.length) onAddFiles(dropped, intent);
+    if (dropped.length) onAddFiles(dropped);
   }
 
   return (
@@ -205,23 +204,6 @@ function UploadStage({ files, selectedId, onSelectFile, onAddFiles, onDeleteFile
               </div>
             </div>
 
-            <div>
-              <label htmlFor="intent" style={{ fontSize: "var(--text-caption-size)", color: "var(--text-muted-48)", display: "block", marginBottom: 6 }}>
-                Intent <span style={{ opacity: 0.7 }}>(optional — narrows the result to matching chunks)</span>
-              </label>
-              <input
-                id="intent" type="text" value={intent} spellCheck="false"
-                onChange={(e) => setIntent(e.target.value)}
-                placeholder='e.g. "show me the multi-head attention algorithm"'
-                style={{
-                  width: "100%", height: 44, boxSizing: "border-box",
-                  fontFamily: "var(--font-text)", fontSize: "var(--text-body-size)",
-                  color: "var(--text-ink)", background: "var(--surface-canvas)",
-                  border: "1px solid var(--border-hairline)", borderRadius: "var(--radius-pill)",
-                  padding: "0 20px", outline: "none",
-                }}
-              />
-            </div>
           </div>
         )}
 

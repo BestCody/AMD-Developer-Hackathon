@@ -93,8 +93,13 @@ function App() {
     }
   }
 
-  /** Real files in, real jobs out. */
-  async function addFiles(fileList, intent) {
+  /** Real files in, real jobs out.
+   *
+   * No intent is sent: the console converts the whole document. `API.run`
+   * and POST /api/run still accept the optional `intent` field, and
+   * /api/result still filters on it when a job carried one.
+   */
+  async function addFiles(fileList) {
     for (const file of fileList) {
       // Optimistic row keyed by a temp id, swapped for the real job id below.
       const tempId = `pending-${crypto.randomUUID()}`;
@@ -102,7 +107,7 @@ function App() {
       setSelectedId(tempId);
 
       try {
-        const { job_id } = await API.run(file, intent);
+        const { job_id } = await API.run(file);
         setFiles((prev) => prev.map((f) => (f.id === tempId ? { ...f, id: job_id } : f)));
         setSelectedId((cur) => (cur === tempId ? job_id : cur));
         watchJob(job_id);
