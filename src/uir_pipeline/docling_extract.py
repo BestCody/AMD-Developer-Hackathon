@@ -32,9 +32,10 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 logger = logging.getLogger(__name__)
 
@@ -302,6 +303,33 @@ def _label_of(item: Any) -> str:
     return _LABEL_MAP.get(key, "paragraph")
 
 
+#: A decimal point that PDF glyph extraction split apart: ``28 . 4``, ``0 . 1``.
+#: The whitespace *before* the dot is the signature -- prose never puts a space
+#: there, so this cannot rejoin a sentence boundary like ``"...in 2017. 5 of
+#: them..."``, which has no leading space. A trailing space is optional because
+#: the split shows up as both ``0 . 1`` and ``0 .1``.
+_SPLIT_DECIMAL_RE: Final[re.Pattern[str]] = re.compile(r"(?<=\d)\s+\.\s*(?=\d)")
+
+
+def normalize_extracted_text(text: str) -> str:
+    """Repair glyph-spacing artifacts in text lifted out of a PDF.
+
+    pypdfium reports per-glyph positions and Docling joins them on advance
+    width, so a decimal point set with extra kerning becomes its own token:
+    the attention paper's ``Pdrop = 0.1`` extracts as ``Pdrop = 0 . 1`` and
+    its ``28.4`` BLEU as ``28 . 4``.
+
+    That is not cosmetic. The chat prompt tells the model to "quote figures
+    exactly as written", so it faithfully quotes ``0 . 1``; retrieval keyed on
+    ``"0.1"`` never matches; and any downstream numeric parse fails. Fifteen
+    occurrences in one 15-page paper.
+
+    Applied at :func:`_text_of`, the single point every region, table and
+    page-text passes through.
+    """
+    return _SPLIT_DECIMAL_RE.sub(".", text)
+
+
 def _text_of(item: Any) -> str:
     """Return the text string for a Docling item.
 
@@ -314,7 +342,7 @@ def _text_of(item: Any) -> str:
     for attr in ("text", "orig", "exported_text"):
         v = getattr(item, attr, None)
         if isinstance(v, str) and v.strip():
-            return v.strip()
+            return normalize_extracted_text(v.strip())
     # Docling FigureItem / TableItem handle text via export methods.
     for method in ("export_to_markdown", "get_text"):
         fn = getattr(item, method, None)
@@ -322,7 +350,7 @@ def _text_of(item: Any) -> str:
             try:
                 v = fn()
                 if isinstance(v, str) and v.strip():
-                    return v.strip()
+                    return normalize_extracted_text(v.strip())
             except Exception:  # noqa: BLE001 -- export failures are silent here
                 continue
     return ""

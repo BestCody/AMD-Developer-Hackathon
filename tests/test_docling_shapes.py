@@ -427,3 +427,76 @@ def test_injected_converter_bypasses_ocr_resolution(tmp_path, monkeypatch):
 def test_looks_scanned_survives_a_page_count_of_zero():
     from uir_pipeline.docling_extract import _looks_scanned
     assert _looks_scanned(SimpleNamespace(pages={}, texts=[])) is True
+
+
+# ---------------------------------------------------------------------------
+# bug 6 -- PDF glyph extraction splits decimal points
+# ---------------------------------------------------------------------------
+# pypdfium reports per-glyph positions; docling joins on advance width, so a
+# kerned decimal point becomes its own token. "Attention Is All You Need"
+# extracts `Pdrop = 0.1` as `Pdrop = 0 . 1` and `28.4` BLEU as `28 . 4` --
+# 15 occurrences in 15 pages. The chat prompt says "quote figures exactly",
+# so the model dutifully quoted the corrupted number.
+
+def test_split_decimal_is_rejoined():
+    from uir_pipeline.docling_extract import normalize_extracted_text
+
+    assert normalize_extracted_text("Pdrop = 0 . 1 .") == "Pdrop = 0.1 ."
+    assert normalize_extracted_text("BLEU score of 28 . 4.") == "BLEU score of 28.4."
+    assert normalize_extracted_text("beta1 = 0 . 9 , beta2 = 0 . 98") == "beta1 = 0.9 , beta2 = 0.98"
+
+
+def test_split_decimal_without_trailing_space_is_rejoined():
+    from uir_pipeline.docling_extract import normalize_extracted_text
+
+    assert normalize_extracted_text("instead of 0 .3") == "instead of 0.3"
+
+
+def test_a_sentence_boundary_before_a_number_is_not_joined():
+    """`...in 2017. 5 of them...` must not become `2017.5`.
+
+    Prose never puts a space *before* a period, which is what distinguishes
+    the extraction artifact from a real sentence end.
+    """
+    from uir_pipeline.docling_extract import normalize_extracted_text
+
+    for text in (
+        "Published in 2017. 5 of the authors were at Google.",
+        "See Table 3. 5 configurations were tried.",
+        "Ends here. 1 more thing.",
+    ):
+        assert normalize_extracted_text(text) == text
+
+
+def test_normalization_leaves_ordinary_prose_alone():
+    from uir_pipeline.docling_extract import normalize_extracted_text
+
+    for text in ("no digits here.", "version 1.0 exactly", "a . b", "3 . x", "x . 4"):
+        assert normalize_extracted_text(text) == text
+
+
+def test_text_of_normalizes_region_text():
+    from uir_pipeline.docling_extract import _text_of
+
+    assert _text_of(SimpleNamespace(text="rate of 0 . 1")) == "rate of 0.1"
+
+
+def test_text_of_normalizes_exported_table_markdown():
+    class _Table:
+        def export_to_markdown(self):
+            return "| BLEU |\n| 28 . 4 |"
+
+    from uir_pipeline.docling_extract import _text_of
+
+    assert "28.4" in _text_of(_Table())
+
+
+def test_walk_doc_emits_normalized_text():
+    doc = SimpleNamespace(
+        pages={1: SimpleNamespace(page_no=1)},
+        texts=[_text_item("we use a rate of 0 . 1 here", 1, _BBox(0, 10, 5, 0))],
+        tables=[], pictures=[],
+    )
+    (region,) = _walk_doc(doc).regions
+    assert "0.1" in region["text"]
+    assert "0 . 1" not in region["text"]

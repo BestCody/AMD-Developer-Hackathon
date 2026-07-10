@@ -175,9 +175,10 @@ def test_empty_contexts_short_circuit_carries_the_new_keys():
 def test_cosine_floor_sits_inside_the_measured_gap():
     """Swept on a 267-chunk UIR with bge-small-en-v1.5.
 
-    out-of-domain top-1 cosine peaked at 0.570; the lowest chunk that
-    actually contained an answer scored 0.614. The floor must fall strictly
-    between, or it either admits off-topic queries or discards answers. The
-    old 0.62 sat above 0.614 and silently dropped a correct passage.
+    Out-of-domain top-1 cosine peaked at 0.570; the lowest chunk that actually
+    contained an answer scored 0.683 (10 of 10 questions). The floor must fall
+    strictly between, or it either admits off-topic queries or discards
+    answers. The original 0.62 sat above the then-worst answer-bearing chunk
+    (0.614) and silently dropped a correct passage.
     """
-    assert 0.570 < MIN_COSINE_SCORE < 0.614
+    assert 0.570 < MIN_COSINE_SCORE < 0.683

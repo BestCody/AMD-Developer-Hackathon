@@ -56,13 +56,18 @@ DEFAULT_TOP_K: Final[int] = 6
 #: answers and 6 it does not:
 #:
 #:     out-of-domain top-1 cosine:      max 0.570
-#:     answer-bearing chunk cosine:     min 0.614
+#:     answer-bearing chunk cosine:     min 0.683   (10 of 10 retrieved)
 #:
-#: The populations separate with a 0.044-wide gap and no overlap. 0.58 sits
-#: in the middle: it rejected all 6 off-topic queries and dropped none of
-#: the 9 answer-bearing chunks. The previous 0.62 sat *above* the worst
-#: answer-bearing chunk, so it discarded a passage containing the answer
-#: while rejecting no additional off-topic query -- pure false negative.
+#: The populations separate cleanly, with no overlap. 0.58 sits below the
+#: worst answer-bearing chunk and above every off-topic query: it rejects
+#: all 6 off-topic queries and drops none of the 10 answers. The original
+#: 0.62 sat *above* the worst answer-bearing chunk, discarding a passage
+#: that contained the answer while rejecting no additional off-topic query.
+#:
+#: (The first sweep put the worst answer-bearing chunk at 0.614 and found
+#: only 9 of 10, because PDF extraction had split `0.1` into `0 . 1`; see
+#: `docling_extract.normalize_extracted_text`. Fixing that raised the floor
+#: of the answer population, which widened the gap rather than moving it.)
 #:
 #: Caveat: one document, one embedding model, one topic. Re-run the sweep
 #: if either the model or the corpus changes; the gap is what matters, not
