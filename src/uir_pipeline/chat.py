@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Final
 
@@ -47,11 +48,26 @@ _DEFAULT_MAX_TOKENS: Final[int] = 1024
 DEFAULT_TOP_K: Final[int] = 6
 
 #: Chunks scoring below this against the query are dropped before they
-#: reach the model. BGE cosine on unrelated text lands around 0.5-0.6;
-#: genuinely on-topic chunks sit well above 0.7. Without a floor, an
-#: off-topic question retrieves the six *least bad* chunks and the model
-#: dutifully confabulates an answer around them.
-MIN_COSINE_SCORE: Final[float] = 0.62
+#: reach the model. Without a floor, an off-topic question retrieves the
+#: six *least bad* chunks and the model confabulates an answer around them.
+#:
+#: Measured, not guessed. Swept over a 267-chunk UIR of "Attention Is All
+#: You Need" with BAAI/bge-small-en-v1.5, using 10 questions the paper
+#: answers and 6 it does not:
+#:
+#:     out-of-domain top-1 cosine:      max 0.570
+#:     answer-bearing chunk cosine:     min 0.614
+#:
+#: The populations separate with a 0.044-wide gap and no overlap. 0.58 sits
+#: in the middle: it rejected all 6 off-topic queries and dropped none of
+#: the 9 answer-bearing chunks. The previous 0.62 sat *above* the worst
+#: answer-bearing chunk, so it discarded a passage containing the answer
+#: while rejecting no additional off-topic query -- pure false negative.
+#:
+#: Caveat: one document, one embedding model, one topic. Re-run the sweep
+#: if either the model or the corpus changes; the gap is what matters, not
+#: the constant.
+MIN_COSINE_SCORE: Final[float] = 0.58
 
 _SYSTEM_PROMPT: Final[str] = (
     "You answer questions about the user's documents using ONLY the "
@@ -198,6 +214,55 @@ def _format_context_block(contexts: list[dict[str, Any]]) -> str:
     return "\n\n".join(parts)
 
 
+#: Matches an inline citation marker: [1], [12]. Deliberately not matching
+#: [1, 2] or [a] -- the prompt asks for one integer per bracket, and a marker
+#: we don't recognise is left alone rather than mangled.
+#:
+#: The lookbehind keeps ``array[0]`` and ``x[1]`` -- subscripts in quoted code,
+#: which this corpus is full of -- from being read as citations and deleted. A
+#: real marker follows a space or punctuation, never an identifier character.
+_CITATION_RE: Final[re.Pattern[str]] = re.compile(r"(?<![\w\]])\[(\d+)\]")
+
+
+def _validate_citations(reply: str, n_contexts: int) -> tuple[str, list[int]]:
+    """Strip citation markers that point at passages we never supplied.
+
+    The system prompt says "never invent a citation number", but a prompt is
+    a request, not a constraint. A model that answers with "[4]" when three
+    passages were given produces a claim the reader cannot check and that
+    *looks* sourced -- strictly worse than an uncited claim.
+
+    Returns the cleaned reply and the sorted invalid numbers found. Only the
+    marker is removed; the surrounding sentence is left untouched, because we
+    can't know which passage (if any) the model meant.
+    """
+    invalid: set[int] = set()
+
+    def _sub(match: re.Match[str]) -> str:
+        num = int(match.group(1))
+        if 1 <= num <= n_contexts:
+            return match.group(0)
+        invalid.add(num)
+        return ""
+
+    cleaned = _CITATION_RE.sub(_sub, reply)
+    if invalid:
+        # Removing " [4]" leaves a double space or a space before punctuation.
+        cleaned = re.sub(r" +([.,;:!?])", r"\1", cleaned)
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+    return cleaned, sorted(invalid)
+
+
+def _cited_indices(reply: str, n_contexts: int) -> list[int]:
+    """1-based passage numbers the reply actually cites, in order of appearance."""
+    seen: list[int] = []
+    for m in _CITATION_RE.finditer(reply):
+        num = int(m.group(1))
+        if 1 <= num <= n_contexts and num not in seen:
+            seen.append(num)
+    return seen
+
+
 def answer(
     query: str,
     contexts: list[dict[str, Any]],
@@ -222,6 +287,8 @@ def answer(
             "success": True,
             "answer": "I can't answer that from the documents you've converted.",
             "citations": [],
+            "cited": [],
+            "invalid_citations": [],
             "model": None,
             "usage": {},
             "grounded": False,
@@ -300,10 +367,20 @@ def answer(
         usage = data.get("usage", {})
         logger.info("fireworks chat response: model=%s tokens=%s", resolved_model, usage)
 
+        reply, invalid = _validate_citations(reply.strip(), len(contexts))
+        if invalid:
+            logger.warning(
+                "chat model cited %d passage(s) that were never supplied "
+                "(%s; only %d given); markers stripped from the answer",
+                len(invalid), invalid, len(contexts),
+            )
+
         return {
             "success": True,
-            "answer": reply.strip(),
+            "answer": reply,
             "citations": contexts,
+            "cited": _cited_indices(reply, len(contexts)),
+            "invalid_citations": invalid,
             "model": resolved_model,
             "usage": usage,
             "grounded": True,

@@ -226,6 +226,39 @@ def test_a_python_exception_keeps_the_worker_alive(app):
     assert _pid(app) == before
 
 
+def test_worker_respawns_when_a_docling_env_var_changes(app, monkeypatch):
+    """The child reads DOCLING_* at spawn. Changing it must take effect."""
+    c = _client(app)
+    assert _wait(c, _upload(c, "one.pdf", mode="ok"))["status"] == "done"
+    before = _pid(app)
+
+    monkeypatch.setenv("DOCLING_OCR", "off")
+    assert _wait(c, _upload(c, "two.pdf", mode="ok"))["status"] == "done"
+    assert _pid(app) != before, "a changed DOCLING_* must respawn the worker"
+
+
+def test_worker_is_not_respawned_for_an_unrelated_env_var(app, monkeypatch):
+    c = _client(app)
+    assert _wait(c, _upload(c, "one.pdf", mode="ok"))["status"] == "done"
+    before = _pid(app)
+
+    monkeypatch.setenv("SOME_UNRELATED_VAR", "1")
+    assert _wait(c, _upload(c, "two.pdf", mode="ok"))["status"] == "done"
+    assert _pid(app) == before, "only watched vars force a respawn"
+
+
+def test_env_fingerprint_watches_docling_and_pipeline_module(monkeypatch):
+    from uir_pipeline.web import _worker_env_fingerprint
+
+    monkeypatch.setenv("DOCLING_OCR", "auto")
+    monkeypatch.setenv("UIR_PIPELINE_MODULE", "x")
+    monkeypatch.setenv("TOTALLY_UNRELATED", "y")
+    fp = _worker_env_fingerprint()
+    assert fp["DOCLING_OCR"] == "auto"
+    assert fp["UIR_PIPELINE_MODULE"] == "x"
+    assert "TOTALLY_UNRELATED" not in fp
+
+
 def test_shutdown_stops_the_worker(app, monkeypatch):
     monkeypatch.setenv("STUB_PIPELINE_MODE", "ok")
     c = _client(app)

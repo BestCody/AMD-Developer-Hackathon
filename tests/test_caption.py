@@ -147,25 +147,36 @@ def test_detect_figure_regions_filters_tiny_bboxes(tmp_path):
     assert out == []
 
 
-def test_detect_figure_regions_returns_shape(monkeypatch, tmp_path):
-    """detect_figure_regions returns dict-shaped records on a known PDF.
+def test_detect_figure_regions_returns_shape():
+    """detect_figure_regions_from_docling reads `pictures` off a DoclingResult.
 
-    Uses a stub :func:`render_figure_crop` so the test never depends on
-    PyMuPDF actually rendering anything.
+    Renamed from `detect_figure_regions` in ea0e9ad, which also changed the
+    argument from a PDF path to an already-converted DoclingResult -- so the
+    function no longer runs the 2 GB converter itself.
     """
-    pytest.importorskip("reportlab")
-    import uir_pipeline.caption as caption_mod
-    from reportlab.lib.pagesizes import letter
-    from reportlab.pdfgen import canvas as rl_canvas
-    pdf = tmp_path / "blank.pdf"
-    c = rl_canvas.Canvas(str(pdf), pagesize=letter)
-    c.drawString(72, 720, "Hello world")
-    c.showPage()
-    c.save()
+    from types import SimpleNamespace
 
-    regions = caption_mod.detect_figure_regions(pdf)
-    # No images -> empty list.
-    assert regions == []
+    import uir_pipeline.caption as caption_mod
+
+    empty = SimpleNamespace(pictures=[])
+    assert caption_mod.detect_figure_regions_from_docling(empty) == []
+
+    pic = {"page": 1, "bbox": (72, 600, 192, 681),
+           "bbox_pixel": (72, 600, 192, 681), "kind": "picture"}
+    dr = SimpleNamespace(pictures=[pic])
+    assert caption_mod.detect_figure_regions_from_docling(dr) == [pic]
+
+
+def test_detect_figure_regions_honours_page_numbers():
+    from types import SimpleNamespace
+
+    from uir_pipeline.caption import detect_figure_regions_from_docling
+
+    dr = SimpleNamespace(pictures=[
+        {"page": 1, "bbox": (0, 0, 100, 100), "kind": "picture"},
+        {"page": 3, "bbox": (0, 0, 100, 100), "kind": "picture"},
+    ])
+    assert [p["page"] for p in detect_figure_regions_from_docling(dr, page_numbers=[3])] == [3]
 
 
 def test_encode_image_b64_round_trip():
@@ -267,11 +278,43 @@ def test_caption_figures_handles_missing_pymupdf(monkeypatch, tmp_path):
 def test_public_api_exports_present():
     import uir_pipeline.caption as caption_mod
     for name in [
-        "caption_images", "detect_figure_regions", "render_figure_crop",
+        "caption_images", "detect_figure_regions_from_docling", "render_figure_crop",
         "encode_image_b64", "caption_figures_in_pdf", "is_available",
         "MODEL_ID", "DEFAULT_PROMPT",
     ]:
         assert hasattr(caption_mod, name), f"missing public symbol {name}"
+
+
+def test_min_dim_filter_measures_on_the_canvas_not_a_rescaled_value():
+    """A half-page figure must survive the tiny-bbox filter.
+
+    `min_dim_px` (50) is expressed on the 0-1000 UIR canvas -- about 5% of the
+    page. Rescaling the bbox by 50/1000 before comparing, as the code once did,
+    turned a 120-unit figure into 6 and rejected everything under 833 units
+    wide: every figure but a full-bleed one was silently dropped.
+    """
+    from types import SimpleNamespace
+
+    import uir_pipeline.caption as caption_mod
+
+    half_page = {"page": 1, "bbox": (100, 100, 600, 500), "kind": "picture"}
+    tiny = {"page": 1, "bbox": (10, 10, 30, 30), "kind": "picture"}
+    dr = SimpleNamespace(pictures=[half_page, tiny])
+
+    captured: list[dict] = []
+    caption_mod_images = caption_mod.caption_images
+
+    def _fake_caption_images(images, **kw):
+        return ["a caption"] * len(images)
+
+    caption_mod.caption_images = _fake_caption_images
+    try:
+        out = caption_mod.caption_figures_in_pdf(docling_result=dr)
+    finally:
+        caption_mod.caption_images = caption_mod_images
+
+    assert len(out) == 1, "the half-page figure must not be filtered out"
+    assert out[0]["bbox_canvas"] == (100, 100, 600, 500)
 
 
 def test_module_import_does_not_load_florence_weights():

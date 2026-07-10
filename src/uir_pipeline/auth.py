@@ -30,6 +30,7 @@ import logging
 import os
 import secrets
 import sqlite3
+import sys
 import threading
 import time
 from pathlib import Path
@@ -240,7 +241,43 @@ class UserStore:
         logger.info("created user id=%d email=%s", user_id, email)
         return {"id": user_id, "email": email, "name": name.strip()}
 
+    def set_password(self, email: str, password: str) -> None:
+        """Replace a user's password. Raises :class:`AuthError` if unknown.
+
+        There is no self-serve reset flow: that needs a mail transport to
+        prove control of the address, and we have none. Emailing nothing and
+        calling it a reset would be worse than admitting the gap. This is the
+        operator path -- see ``python -m uir_pipeline.auth``.
+
+        Unlike :meth:`verify_user`, this *does* disclose whether the address
+        exists. That is fine: the caller already has filesystem access to the
+        password database.
+        """
+        email = normalize_email(email)
+        if len(password) < MIN_PASSWORD_LEN:
+            raise AuthError(
+                f"Password must be at least {MIN_PASSWORD_LEN} characters."
+            )
+        if len(password) > MAX_PASSWORD_LEN:
+            raise AuthError("Password is too long.")
+
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE users SET password_hash = ? WHERE email = ?",
+                (generate_password_hash(password), email),
+            )
+            if cur.rowcount == 0:
+                raise AuthError(f"No account with email {email!r}.")
+        logger.info("password reset for email=%s", email)
+
     # -- reads ----------------------------------------------------------
+
+    def list_users(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, email, name, created_at FROM users ORDER BY id"
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def get_by_id(self, user_id: int) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -277,6 +314,73 @@ class UserStore:
 
         throttle.record_success(email, ip)
         return {"id": int(row["id"]), "email": row["email"], "name": row["name"]}
+
+
+#: Where `web.create_app` puts the user database when `data_dir` is default.
+DEFAULT_DB_PATH = Path("data") / "monadlabs.db"
+
+
+def _main(argv: list[str] | None = None) -> int:
+    """Operator CLI: list accounts and reset a forgotten password.
+
+    The console has no self-serve password reset, because a reset link has to
+    be delivered to a mailbox we can't reach -- there is no mail transport
+    configured. Rather than pretend, the recovery path is explicitly manual
+    and requires filesystem access to the database::
+
+        python -m uir_pipeline.auth list
+        python -m uir_pipeline.auth reset alice@example.com
+
+    The password is read from a no-echo prompt, or from stdin when piped. It
+    is never taken from argv: arguments land in shell history and are visible
+    to every other process via `ps`.
+    """
+    import argparse
+    import getpass
+
+    parser = argparse.ArgumentParser(prog="python -m uir_pipeline.auth")
+    parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH,
+                        help=f"path to the user database (default: {DEFAULT_DB_PATH})")
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("list", help="list accounts")
+    reset = sub.add_parser("reset", help="set a new password for an account")
+    reset.add_argument("email")
+
+    args = parser.parse_args(argv)
+    if not args.db.exists():
+        print(f"no user database at {args.db}", file=sys.stderr)
+        return 1
+    store = UserStore(args.db)
+
+    if args.command == "list":
+        users = store.list_users()
+        if not users:
+            print("no accounts")
+        for u in users:
+            print(f"{u['id']:>4}  {u['email']}")
+        return 0
+
+    if sys.stdin.isatty():
+        password = getpass.getpass("New password: ")
+        if password != getpass.getpass("Repeat: "):
+            print("passwords did not match", file=sys.stderr)
+            return 1
+    else:
+        password = sys.stdin.readline().rstrip("\n")
+
+    try:
+        store.set_password(args.email, password)
+    except AuthError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(f"password updated for {normalize_email(args.email)}")
+    print("Any existing session cookie remains valid; rotate SECRET_KEY to "
+          "invalidate all sessions.")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(_main())
 
 
 __all__ = [

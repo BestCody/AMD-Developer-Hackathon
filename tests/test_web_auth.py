@@ -301,3 +301,59 @@ def test_chat_surfaces_model_failure_instead_of_faking_an_answer(app, monkeypatc
     r = c.post("/api/chat", json={"message": "hi"})
     assert r.status_code == 502
     assert "Chat model call failed" in r.get_json()["error"]
+
+
+# ---------------------------------------------------------------------------
+# Operator password reset (no self-serve flow: there is no mail transport)
+# ---------------------------------------------------------------------------
+
+def test_set_password_lets_the_user_log_in_again(tmp_path):
+    from uir_pipeline.auth import AuthError, UserStore
+
+    store = UserStore(tmp_path / "u.db")
+    store.create_user("a@b.co", "original-password")
+
+    store.set_password("a@b.co", "brand-new-password")
+
+    assert store.verify_user("a@b.co", "brand-new-password")["email"] == "a@b.co"
+    with pytest.raises(AuthError):
+        store.verify_user("a@b.co", "original-password")
+
+
+def test_set_password_rejects_an_unknown_account(tmp_path):
+    from uir_pipeline.auth import AuthError, UserStore
+
+    store = UserStore(tmp_path / "u.db")
+    with pytest.raises(AuthError, match="No account"):
+        store.set_password("nobody@b.co", "brand-new-password")
+
+
+def test_set_password_enforces_the_minimum_length(tmp_path):
+    from uir_pipeline.auth import MIN_PASSWORD_LEN, AuthError, UserStore
+
+    store = UserStore(tmp_path / "u.db")
+    store.create_user("a@b.co", "original-password")
+    with pytest.raises(AuthError, match="at least"):
+        store.set_password("a@b.co", "x" * (MIN_PASSWORD_LEN - 1))
+    # the old password must still work -- a rejected reset must not lock anyone out
+    assert store.verify_user("a@b.co", "original-password")
+
+
+def test_set_password_normalizes_the_email(tmp_path):
+    from uir_pipeline.auth import UserStore
+
+    store = UserStore(tmp_path / "u.db")
+    store.create_user("a@b.co", "original-password")
+    store.set_password("  A@B.CO  ", "brand-new-password")
+    assert store.verify_user("a@b.co", "brand-new-password")
+
+
+def test_list_users_returns_no_password_hashes(tmp_path):
+    """The operator CLI prints this; a hash must never reach a terminal/log."""
+    from uir_pipeline.auth import UserStore
+
+    store = UserStore(tmp_path / "u.db")
+    store.create_user("a@b.co", "original-password")
+    (row,) = store.list_users()
+    assert "password_hash" not in row and "password" not in row
+    assert row["email"] == "a@b.co"

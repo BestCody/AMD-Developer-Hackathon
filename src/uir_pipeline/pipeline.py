@@ -383,8 +383,12 @@ def run(
             from uir_pipeline.caption import caption_figures_in_pdf
             from uir_pipeline.utils import count_tokens as _bpe_count_tokens
             # Forward the same DoclingResult so caption uses figure bboxes
-            # from dr.pictures (no pdfplumber path).
+            # from dr.pictures (no pdfplumber path) -- and the source path so
+            # it can render the crops. Without `pdf_path` the renderer is
+            # skipped entirely and every `image_b64` comes back None; passing
+            # both reuses the conversion rather than re-running Docling.
             figure_records = caption_figures_in_pdf(
+                p,
                 docling_result=docling_result,
                 page_numbers=page_numbers,
             )

@@ -338,7 +338,6 @@ def caption_figures_in_pdf(
     page_numbers: list[int] | None = None,
     device: str | None = None,
     dpi: int = 144,
-    _match_dim: int = 50,
 ) -> list[dict[str, Any]]:
     """Run detect -> render -> caption for every figure in ``pdf_path`` or ``docling_result``.
 
@@ -380,9 +379,13 @@ def caption_figures_in_pdf(
     rendered: list[tuple[dict[str, Any], Any]] = []
     for r in regions:
         canvas_bbox = tuple(r["bbox"])  # x1, y1, x2, y2 on 0-1000
-        width_px = (canvas_bbox[2] - canvas_bbox[0]) * _match_dim / 1000.0
-        height_px = (canvas_bbox[3] - canvas_bbox[1]) * _match_dim / 1000.0
-        if width_px < min_dim_px or height_px < min_dim_px:
+        # `min_dim_px` is already expressed on the 0-1000 canvas (50 ~= 5% of
+        # the page), so compare canvas extents directly. Rescaling by 50/1000
+        # first -- as this did -- shrinks a 120-unit figure to 6 and rejects
+        # everything narrower than 833 units, i.e. all but full-width figures.
+        width = canvas_bbox[2] - canvas_bbox[0]
+        height = canvas_bbox[3] - canvas_bbox[1]
+        if width < min_dim_px or height < min_dim_px:
             continue
         # Re-scale to PDF points using known page dims (derived from
         # canvas height == 1000 unit total page -- so factor = page_px / 1000).

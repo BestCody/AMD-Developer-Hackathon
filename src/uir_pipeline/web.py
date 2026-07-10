@@ -198,6 +198,22 @@ def _pipeline_worker_loop(job_q: Any, progress_q: Any, result_q: Any) -> None:
             result_q.put((job_id, "error", f"{type(exc).__name__}: {exc}"))
 
 
+#: Environment the *child* reads at import/convert time. A spawned process
+#: inherits the parent's environment once, at spawn; changing one of these in
+#: a running server would otherwise have no effect until the worker happened
+#: to die, which is a confusing thing to debug. We fingerprint them and
+#: respawn on change.
+_WORKER_ENV_PREFIXES: tuple[str, ...] = ("DOCLING_", "UIR_PIPELINE_MODULE")
+
+
+def _worker_env_fingerprint() -> dict[str, str]:
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if any(k.startswith(p) for p in _WORKER_ENV_PREFIXES)
+    }
+
+
 class _WarmWorker:
     """A single long-lived pipeline child process, respawned when it dies.
 
@@ -227,9 +243,11 @@ class _WarmWorker:
         self._job_q: Any = None
         self._progress_q: Any = None
         self._result_q: Any = None
+        self._env: dict[str, str] = {}
 
     # -- lifecycle ---------------------------------------------------------
     def _spawn(self) -> None:
+        self._env = _worker_env_fingerprint()
         self._job_q = self._ctx.Queue()
         self._progress_q = self._ctx.Queue()
         self._result_q = self._ctx.Queue()
@@ -245,6 +263,13 @@ class _WarmWorker:
         """Tear the worker down and return its exit code."""
         code = None
         if self._proc is not None:
+            if self._proc.is_alive():
+                # It is parked on job_q.get() and will never exit on its own;
+                # without this the join below always burns its full timeout.
+                try:
+                    self._job_q.put(("stop",))
+                except Exception:  # noqa: BLE001
+                    pass
             self._proc.join(timeout=_CHILD_JOIN_TIMEOUT)
             if self._proc.is_alive():  # pragma: no cover -- child ignoring termination
                 self._proc.kill()
@@ -263,12 +288,7 @@ class _WarmWorker:
 
     def shutdown(self) -> None:
         with self._lock:
-            if self._proc is not None and self._proc.is_alive():
-                try:
-                    self._job_q.put(("stop",))
-                except Exception:  # noqa: BLE001
-                    pass
-            self._discard()
+            self._discard()  # sends ("stop",) if the child is still alive
 
     # -- job submission ----------------------------------------------------
     def run(
@@ -280,6 +300,20 @@ class _WarmWorker:
         on_progress: Any,
     ) -> SimpleNamespace:
         with self._lock:
+            if self._proc is not None and self._proc.is_alive():
+                current = _worker_env_fingerprint()
+                if current != self._env:
+                    changed = sorted(
+                        set(current) ^ set(self._env)
+                        | {k for k in current.keys() & self._env.keys()
+                           if current[k] != self._env[k]}
+                    )
+                    logger.info(
+                        "worker environment changed (%s); respawning so the "
+                        "child picks it up", ", ".join(changed),
+                    )
+                    self._discard()
+
             if self._proc is None or not self._proc.is_alive():
                 if self._proc is not None:
                     self._discard()
@@ -1052,6 +1086,11 @@ def create_app(
         return jsonify({
             "answer": result["answer"],
             "citations": result["citations"],
+            # Which passages the answer actually cites, and any numbers the
+            # model invented (already stripped from `answer`). The UI can show
+            # only the cited sources instead of all six retrieved ones.
+            "cited": result.get("cited", []),
+            "invalid_citations": result.get("invalid_citations", []),
             "grounded": result.get("grounded", False),
             "model": result.get("model"),
         })
@@ -1094,12 +1133,36 @@ if __name__ == "__main__":  # pragma: no cover
 
     logging.basicConfig(level=logging.INFO)
     port = int(os.environ.get("PORT", "5000"))
+    host = os.environ.get("HOST", "127.0.0.1")
+
+    # Passwords are POSTed and the session cookie is replayed on every request.
+    # Over plain HTTP both cross the network in cleartext, so anyone on the same
+    # wifi can read them or steal the session. Loopback is fine (the traffic
+    # never leaves the machine); a routable bind is not, unless a TLS terminator
+    # sits in front -- which is exactly what SESSION_COOKIE_SECURE asserts.
+    _loopback = host in ("127.0.0.1", "::1", "localhost")
+    if not _loopback and not _env_flag("SESSION_COOKIE_SECURE", default=False):
+        if not _env_flag("UIR_ALLOW_INSECURE_BIND", default=False):
+            raise SystemExit(
+                f"Refusing to serve on {host}:{port} over plain HTTP.\n"
+                "Passwords and session cookies would cross the network in "
+                "cleartext.\n\n"
+                "  - Put a TLS terminator in front and set SESSION_COOKIE_SECURE=1, or\n"
+                "  - keep HOST=127.0.0.1 (the default), or\n"
+                "  - set UIR_ALLOW_INSECURE_BIND=1 if this network is genuinely trusted."
+            )
+        logger.warning(
+            "serving on %s over plain HTTP with UIR_ALLOW_INSECURE_BIND=1: "
+            "passwords and session cookies are readable by anyone on this network",
+            host,
+        )
+
     _app = create_app()
     _worker = _app.config.get("PIPELINE_WORKER")
     if _worker is not None:
         # Ask the child to stop between jobs rather than be killed mid-write.
         atexit.register(_worker.shutdown)
-    _app.run(host="127.0.0.1", port=port, debug=False, use_reloader=False)
+    _app.run(host=host, port=port, debug=False, use_reloader=False)
 
 
 __all__ = ["create_app"]
