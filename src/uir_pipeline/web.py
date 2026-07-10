@@ -915,10 +915,13 @@ def create_app(
         # PLAN §17 §Multi-format follow-up: the pipeline now routes a
         # dozen+ formats through PDF / DOCLING / PPTX_NATIVE / TEXT /
         # IMAGE -- the upload form should accept everything the
-        # orchestrator can ingest. We use the format_router's canonical
-        # SUPPORTED_EXTENSIONS list as the source of truth so a future
-        # format addition is a one-line change.
-        from uir_pipeline.format_router import SUPPORTED_EXTENSIONS
+        # orchestrator can ingest, and nothing it cannot.
+        #
+        # CONVERTIBLE_EXTENSIONS, not SUPPORTED_EXTENSIONS: the latter also
+        # names the legacy binary Office formats (.doc/.ppt/.xls), which the
+        # router recognises but classifies SKIP. Gating on it accepted the
+        # upload and then failed the job seconds later inside `ingest_any`.
+        from uir_pipeline.format_router import CONVERTIBLE_EXTENSIONS
         # Path(...).name strips any directory components a malicious
         # client might have inserted (the FileStorage.filename is taken
         # from the multipart Content-Disposition verbatim). ``suffix``
@@ -926,10 +929,10 @@ def create_app(
         # upload has none.
         safe_name = Path(upload.filename).name
         ext = Path(safe_name).suffix.lower()
-        if ext not in SUPPORTED_EXTENSIONS:
+        if ext not in CONVERTIBLE_EXTENSIONS:
             abort(400, description=(
                 f"unsupported file type {ext!r}; supported: "
-                f"{', '.join(sorted(SUPPORTED_EXTENSIONS))}"
+                f"{', '.join(sorted(CONVERTIBLE_EXTENSIONS))}"
             ))
 
         job_id = uuid.uuid4().hex

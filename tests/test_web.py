@@ -623,3 +623,34 @@ def test_result_endpoint_409_if_not_done(client, monkeypatch, sample_pdf):
     r = client.get(f"/api/result/{job_id}")
     assert r.status_code == 409
     assert "running" in r.get_json()["error"].lower() or "queued" in r.get_json()["error"].lower()
+
+
+def test_run_rejects_a_legacy_binary_office_file(client, tmp_path):
+    """`.doc` is recognised by the router but classified SKIP.
+
+    Gating on SUPPORTED_EXTENSIONS accepted the upload and then failed the job
+    several seconds later inside `ingest_any`. Reject it at the door.
+    """
+    legacy = tmp_path / "old.doc"
+    legacy.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1legacy ole2")
+    with legacy.open("rb") as fh:
+        resp = client.post(
+            "/api/run",
+            data={"file": (fh, "old.doc")},
+            content_type="multipart/form-data",
+        )
+    assert resp.status_code == 400
+    assert "unsupported" in (resp.get_json()["error"] or "").lower()
+
+
+def test_run_error_message_does_not_advertise_unconvertible_formats(client, tmp_path):
+    bad = tmp_path / "foo.xyz"
+    bad.write_bytes(b"\x00\x01")
+    with bad.open("rb") as fh:
+        resp = client.post(
+            "/api/run", data={"file": (fh, "foo.xyz")},
+            content_type="multipart/form-data",
+        )
+    msg = resp.get_json()["error"]
+    assert ".doc," not in msg and ".ppt," not in msg and ".xls," not in msg
+    assert ".pdf" in msg and ".ipynb" in msg

@@ -285,8 +285,22 @@ SUPPORTED_EXTENSIONS: Final[frozenset[str]] = frozenset({
     *_IMAGE_EXTENSIONS,
 })
 
+#: Extensions the orchestrator can actually convert.
+#:
+#: A strict subset of :data:`SUPPORTED_EXTENSIONS`, which includes the legacy
+#: binary Office formats (``.doc`` / ``.ppt`` / ``.xls``) because they are
+#: *recognised*. They are not convertible: :func:`classify_route` sends them to
+#: ``SKIP``. Uploading one used to be accepted by the web form and then fail
+#: several seconds later inside ``ingest_any``. Callers that gate input --
+#: the upload form, the CLI's directory sweep -- want this set.
+CONVERTIBLE_EXTENSIONS: Final[frozenset[str]] = frozenset(
+    ext for ext in SUPPORTED_EXTENSIONS
+    if classify_route(ext.lstrip(".").upper()) is not FormatRoute.SKIP
+)
+
 
 __all__ = [
+    "CONVERTIBLE_EXTENSIONS",
     "FormatRoute",
     "SUPPORTED_EXTENSIONS",
     "classify_route",
