@@ -141,6 +141,16 @@ def _resolve_fast_path(fast_path: str | None) -> str:
     return raw
 
 
+class ImageAnalysisError(RuntimeError):
+    """The IMAGE route could not describe the image.
+
+    `run_image_pipeline` reports failure in `ImagePipelineResult.error` rather
+    than raising, so the orchestrator has to translate. Without this the caller
+    saw a well-formed result whose `out_path` pointed at a file that was never
+    written.
+    """
+
+
 class _NoFigureSource(Exception):
     """The chosen route produced no figure regions to caption.
 
@@ -392,13 +402,22 @@ def run(
             dry_run=dry_run,
             on_progress=on_progress,
         )
+        if img_result.error:
+            # `run_image_pipeline` reports failure in a field, not an
+            # exception. Folding that into `chunk_count=0` and returning a
+            # success-shaped result made the CLI log
+            # "done chart.png: chunks=0 -> <path>" and exit 0 while writing no
+            # file at all, and made the web job report `done` with a `result`
+            # that 404s. Raise instead: the caller already turns this into a
+            # failed job (web) or a non-zero exit (CLI).
+            raise ImageAnalysisError(img_result.error)
         # Synthesise a PipelineResult from the ImagePipelineResult so the
         # calling CLI/web layer receives the same shape it expects.
         return PipelineResult(
             uir_id=img_result.uir_id,
             out_path=img_result.out_path,
             umr_path=img_result.umr_path,
-            chunk_count=1 if not img_result.error else 0,
+            chunk_count=1,
             entity_count=0,
             elapsed_seconds=img_result.elapsed_seconds,
         )
