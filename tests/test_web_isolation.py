@@ -35,7 +35,15 @@ def app(tmp_path, monkeypatch):
         execution="process",
     )
     application.config.update(TESTING=True)
-    return application
+    yield application
+
+    # Each app owns a worker child. Without this the children survive the test
+    # (they are daemons, so they die only with the interpreter) and a full-suite
+    # run accumulates one idle Python process per test -- enough memory pressure
+    # on a small box to make later tests time out.
+    worker = application.config.get("PIPELINE_WORKER")
+    if worker is not None:
+        worker.shutdown()
 
 
 def _client(app):
@@ -279,11 +287,14 @@ def test_a_bad_pipeline_module_is_reported_not_hung(tmp_path, monkeypatch):
         data_dir=tmp_path / "data", execution="process",
     )
     application.config.update(TESTING=True)
-    c = _client(application)
-    final = _wait(c, _upload(c))
-    assert final["status"] == "error"
-    assert "ModuleNotFoundError" in final["error"], final["error"]
-    assert c.get("/api/health").status_code == 200
+    try:
+        c = _client(application)
+        final = _wait(c, _upload(c))
+        assert final["status"] == "error"
+        assert "ModuleNotFoundError" in final["error"], final["error"]
+        assert c.get("/api/health").status_code == 200
+    finally:
+        application.config["PIPELINE_WORKER"].shutdown()
 
 
 # ---------------------------------------------------------------------------

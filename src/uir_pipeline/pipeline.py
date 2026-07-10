@@ -140,6 +140,101 @@ def _resolve_fast_path(fast_path: str | None) -> str:
     return raw
 
 
+class _NoFigureSource(Exception):
+    """The chosen route produced no figure regions to caption.
+
+    Not an error: PPTX_NATIVE never runs Docling, so there is no
+    ``DoclingResult`` carrying figure bboxes. Signalled as an exception only
+    so the caption stage's existing fail-soft structure can skip it without
+    logging a failure.
+    """
+
+
+def _page_texts_from_regions(regions: list[Any]) -> list[tuple[int, str]]:
+    """Collapse regions into ``[(page, joined_text), ...]``, page-ordered.
+
+    The Docling route gets this from ``dr.page_texts``; routes that build
+    regions themselves still owe the chunker the same page-level view.
+    """
+    by_page: dict[int, list[str]] = {}
+    for r in regions:
+        by_page.setdefault(int(r.page), []).append(r.text)
+    return [(page, "\n".join(texts)) for page, texts in sorted(by_page.items())]
+
+
+def _extract_pptx_route(path: Path) -> list[Any]:
+    """Walk a ``.pptx`` with python-pptx and return :class:`LayoutRegion` list.
+
+    Referenced by ``format_router.classify_route``, which sends PPTX here
+    rather than to Docling: Docling's layout model runs on rendered page
+    images, and a python-pptx-generated deck has no rendering, so it returns
+    zero regions. A slide is already structured -- title placeholder, then
+    body placeholders -- so a native walk beats a layout model that has
+    nothing to look at.
+
+    One slide == one page. Shapes carry EMU offsets, not a 0-1000 canvas,
+    so bboxes are scaled against the presentation's own slide dimensions
+    rather than assumed to be letter-sized.
+    """
+    from pptx import Presentation
+    from pptx.util import Emu
+
+    from uir_pipeline.layout import LayoutLabel, LayoutRegion
+
+    prs = Presentation(str(path))
+    slide_w = int(prs.slide_width or Emu(9144000))
+    slide_h = int(prs.slide_height or Emu(6858000))
+
+    def _canvas(shape: Any) -> tuple[int, int, int, int]:
+        try:
+            left, top = int(shape.left or 0), int(shape.top or 0)
+            width, height = int(shape.width or 0), int(shape.height or 0)
+        except (TypeError, ValueError):
+            return (0, 0, 0, 0)
+        x1 = max(0, min(1000, round(left * 1000 / slide_w)))
+        y1 = max(0, min(1000, round(top * 1000 / slide_h)))
+        x2 = max(0, min(1000, round((left + width) * 1000 / slide_w)))
+        y2 = max(0, min(1000, round((top + height) * 1000 / slide_h)))
+        # ChunkNode's validator requires x1 <= x2 and y1 <= y2.
+        if x1 > x2:
+            x1, x2 = x2, x1
+        if y1 > y2:
+            y1, y2 = y2, y1
+        return (x1, y1, x2, y2)
+
+    regions: list[Any] = []
+    order = 0
+    for page_no, slide in enumerate(prs.slides, start=1):
+        # `slide.shapes.title` builds a fresh proxy on every access, so
+        # `shape is slide.shapes.title` is always False. `shape_id` is the
+        # stable identity.
+        title_id = None
+        try:
+            title = slide.shapes.title
+            title_id = title.shape_id if title is not None else None
+        except (AttributeError, ValueError):
+            pass
+        for shape in slide.shapes:
+            if not getattr(shape, "has_text_frame", False):
+                continue
+            text = (shape.text_frame.text or "").strip()
+            if not text:
+                continue
+            order += 1
+            is_title = title_id is not None and shape.shape_id == title_id
+            regions.append(LayoutRegion(
+                label=LayoutLabel.HEADING if is_title else LayoutLabel.PARAGRAPH,
+                text=text,
+                # A placeholder's role is declared in the file, not inferred
+                # by a model, so there is nothing to be uncertain about.
+                confidence=1.0,
+                bbox=_canvas(shape),
+                page=page_no,
+                reading_order=order,
+            ))
+    return regions
+
+
 def _docling_to_table_draft(t: dict[str, Any]) -> Any:
     """Synthesize a :class:`TableDraft` from a docling tables[].dict.
 
@@ -260,7 +355,7 @@ def run(
         upsert_parent_doc,
     )
     from uir_pipeline.enrich import EnrichmentResult, enrich_chunks
-    from uir_pipeline.ingest import DocumentInput, ingest
+    from uir_pipeline.ingest import DocumentInput, ingest, ingest_any
     from uir_pipeline.logging_config import (
         attach_doc_log,
         configure,
@@ -305,7 +400,10 @@ def run(
             except Exception:
                 pass
     _progress("ingest", 5)
-    doc: DocumentInput = ingest(p)
+    # `ingest` is the PDF ingress: it asserts %PDF- magic and reads page count
+    # with pypdf. Neither applies to OOXML, so non-PDF routes take the generic
+    # ingress. `froute` was already resolved above for the IMAGE check.
+    doc: DocumentInput = ingest(p) if froute is FormatRoute.PDF else ingest_any(p)
     doc_id = derive_doc_id(doc.uri)
     log_dir = output_dir.parent / "logs" if output_dir.name != "logs" else output_dir
     log_handler = attach_doc_log(strip_uir_prefix(doc_id), log_dir)
@@ -344,24 +442,34 @@ def run(
             extract_with_docling,
         )
         from uir_pipeline.layout import LayoutLabel, LayoutRegion
-        dr = extract_with_docling(p)
-        docling_result = dr  # forwarded to figure-caption stage
-        all_regions = [
-            LayoutRegion(
-                label=LayoutLabel(r["label"]),
-                text=r["text"],
-                confidence=0.9,
-                bbox=tuple(r["bbox"]),
-                page=int(r["page"]),
-                reading_order=i + 1,
-            )
-            for i, r in enumerate(dr.regions)
-        ]
-        table_drafts = [_docling_to_table_draft(t) for t in dr.tables]
-        page_text_pairs = list(dr.page_texts)
+
+        docling_result = None
+        if froute is FormatRoute.PPTX_NATIVE:
+            # Docling's layout model reads rendered page images; a
+            # python-pptx deck has no rendering, so it returns 0 regions.
+            all_regions = _extract_pptx_route(p)
+            page_text_pairs = _page_texts_from_regions(all_regions)
+        else:
+            # PDF and the DOCLING route (DOCX / XLSX / EPUB / HTML / ...):
+            # DocumentConverter accepts all of them natively.
+            dr = extract_with_docling(p)
+            docling_result = dr  # forwarded to figure-caption stage
+            all_regions = [
+                LayoutRegion(
+                    label=LayoutLabel(r["label"]),
+                    text=r["text"],
+                    confidence=0.9,
+                    bbox=tuple(r["bbox"]),
+                    page=int(r["page"]),
+                    reading_order=i + 1,
+                )
+                for i, r in enumerate(dr.regions)
+            ]
+            table_drafts = [_docling_to_table_draft(t) for t in dr.tables]
+            page_text_pairs = list(dr.page_texts)
         _progress(
             "layout", 45,
-            fast_path="docling",
+            fast_path="docling" if docling_result is not None else "pptx",
             region_count=len(all_regions),
             table_count=len(table_drafts),
         )
@@ -380,6 +488,10 @@ def run(
         caption_records_total = 0
         caption_records_with_text = 0
         try:
+            if docling_result is None:
+                # PPTX_NATIVE never runs Docling, so there are no figure
+                # bboxes to caption. Skip rather than convert a second time.
+                raise _NoFigureSource
             from uir_pipeline.caption import caption_figures_in_pdf
             from uir_pipeline.utils import count_tokens as _bpe_count_tokens
             # Forward the same DoclingResult so caption uses figure bboxes
@@ -387,8 +499,13 @@ def run(
             # it can render the crops. Without `pdf_path` the renderer is
             # skipped entirely and every `image_b64` comes back None; passing
             # both reuses the conversion rather than re-running Docling.
+            #
+            # Crop rendering goes through PyMuPDF, which opens PDFs. On the
+            # DOCLING route (DOCX/XLSX) the bboxes are real but the source is
+            # not a PDF, so pass no path: captions still come back, `image_b64`
+            # is None, and PyMuPDF is never handed a file it cannot open.
             figure_records = caption_figures_in_pdf(
-                p,
+                p if froute is FormatRoute.PDF else None,
                 docling_result=docling_result,
                 page_numbers=page_numbers,
             )
@@ -426,6 +543,14 @@ def run(
                         },
                     },
                 ))
+        except _NoFigureSource:
+            # Not a failure: this route produced no figure bboxes to caption.
+            # Distinct from the handler below so it never logs as an error.
+            _progress(
+                "figure_caption", 60,
+                caption_records_total=0, caption_records_with_text=0,
+                caption_records_empty=0, skipped="route has no figure source",
+            )
         except Exception as exc:
             logger.warning("figure caption stage failed (fail-soft): %s", exc)
             _progress(

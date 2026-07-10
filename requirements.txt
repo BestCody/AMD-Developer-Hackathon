@@ -74,6 +74,13 @@ weaviate-client>=4.5
 # --- Web front-end (Phase N) ---
 flask>=3.1,<4
 
+# --- Multi-format ingress (PLAN §17) ---
+# `pipeline._extract_pptx_route` imports python-pptx directly: docling's layout
+# model runs on rendered page images, and an unrendered deck yields 0 regions,
+# so PPTX gets a native walk instead. It arrives transitively via docling today,
+# but a direct import needs a direct pin.
+python-pptx>=1.0
+
 # --- Dev tooling ---
 pytest>=8.0
 pytest-mock>=3.11
@@ -83,6 +90,10 @@ ruff>=0.1
 # it those fixtures never appear and the tests that need them *skip silently*
 # -- which is how three Docling adapter bugs reached main. Not optional.
 reportlab>=4.0
+# Fixture builders for the multi-format ingress tests (tests/test_ingest_any.py,
+# tests/integration/test_docling_route_e2e.py). Not imported by the pipeline.
+python-docx>=1.1
+openpyxl>=3.1
 
 # --- Phase 18 PDF→Markdown fast-path (PLAN §17 §OCR follow-up) ---
 # Docling (IBM, MIT): transformer-based PDF->DoclingDocument emitter that
