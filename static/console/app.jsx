@@ -18,6 +18,7 @@
 const IconRail = window.ConsoleIconRail;
 const UploadStage = window.ConsoleUploadStage;
 const CopilotChat = window.ConsoleCopilotChat;
+const ChatsPanel = window.ConsoleChatsPanel;
 const LoginScreen = window.ConsoleLoginScreen;
 const SignUpScreen = window.ConsoleSignUpScreen;
 
@@ -158,6 +159,7 @@ function App() {
         />
       )}
       {tab === "copilot" && <CopilotChat files={files} />}
+      {tab === "chats" && <ChatsPanel />}
     </div>
   );
 }

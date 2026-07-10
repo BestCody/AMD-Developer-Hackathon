@@ -102,11 +102,30 @@
   const chat = (message, history, jobIds) =>
     request("/api/chat", { method: "POST", body: { message, history: history || [], job_ids: jobIds } });
 
+  // -- conversations (Chats panel) ------------------------------------------
+
+  const listConversations = () => request("/api/conversations");
+  const createConversation = (title) =>
+    request("/api/conversations", { method: "POST", body: { title: title || "" } });
+  const deleteConversation = (cid) =>
+    request(`/api/conversations/${encodeURIComponent(cid)}`, { method: "DELETE" });
+  const conversationMessages = (cid) =>
+    request(`/api/conversations/${encodeURIComponent(cid)}/messages`);
+  /**
+   * Post a message to a thread. If `text` starts with "gemini:", the server
+   * answers the remainder from the user's documents. Returns
+   * { user_message, reply } -- reply is null for a plain note.
+   */
+  const sendConversationMessage = (cid, text) =>
+    request(`/api/conversations/${encodeURIComponent(cid)}/messages`, { method: "POST", body: { text } });
+
   window.MonadLabsAPI = {
     ApiError,
     isUnauthorized,
     me, login, signup, logout,
     run, status, listJobs, result, umr, downloadUrl, pollUntilSettled,
     chat,
+    listConversations, createConversation, deleteConversation,
+    conversationMessages, sendConversationMessage,
   };
 })();

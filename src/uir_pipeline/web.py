@@ -49,6 +49,7 @@ import logging
 import multiprocessing
 import os
 import queue
+import re
 import threading
 import time
 import uuid
@@ -512,6 +513,7 @@ def create_app(
     Overridable via ``UIR_WEB_EXECUTION``.
     """
     from uir_pipeline.auth import UserStore, resolve_secret_key
+    from uir_pipeline.conversations import ConversationStore
 
     upload_dir = (Path(upload_dir) if upload_dir else Path("/tmp/uir_web_uploads")).resolve()
     upload_dir.mkdir(parents=True, exist_ok=True)
@@ -570,11 +572,17 @@ def create_app(
     )
     users = UserStore(data_dir / "monadlabs.db")
     app.config["USER_STORE"] = users
+    # Chats-panel threads live in the same SQLite file, one table set each.
+    conversations = ConversationStore(data_dir / "monadlabs.db")
+    app.config["CONVERSATION_STORE"] = conversations
 
     # Per-app job registry -- thread-safe by virtue of the GIL guarding dict
     # assignment + the lock below for read-modify-write on the Job itself.
     jobs: dict[str, Job] = {}
     jobs_lock = threading.Lock()
+    # Exposed for tests that need to seed a completed job without driving a
+    # full upload. It is the same dict the routes close over, not a copy.
+    app.config["JOBS"] = jobs
 
     # -------- auth helpers ----------------------------------------------
 
@@ -1050,27 +1058,20 @@ def create_app(
 
     # -------- chat ------------------------------------------------------
 
-    @app.post("/api/chat")
-    @login_required
-    def api_chat() -> ResponseReturnValue:
-        """Answer a question grounded in the caller's converted documents.
+    def _grounded_answer(
+        uid: int, message: str, history: list[Any], *,
+        job_ids: set[str] | None = None,
+    ) -> tuple[dict[str, Any], int]:
+        """Answer ``message`` from the caller's own documents.
 
-        Retrieval spans every ``done`` job the caller owns, unless the
-        body narrows it with ``job_ids``. Jobs belonging to anyone else
-        are filtered out before retrieval -- the model never sees a
-        passage from a document the caller cannot already read.
+        Returns ``(payload, status)``. Retrieval spans every ``done`` job the
+        caller owns, filtered to ``job_ids`` when given. Jobs belonging to
+        anyone else are excluded before retrieval, so the model never sees a
+        passage from a document the caller cannot already read. Shared by
+        ``/api/chat`` and the Chats panel's ``gemini:`` command so the two
+        cannot drift.
         """
         from uir_pipeline import chat as _chat
-
-        body = _json_body()
-        message = (body.get("message") or "").strip()
-        if not message:
-            return jsonify({"error": "message is required"}), 400
-
-        uid = request.user["id"]  # type: ignore[attr-defined]
-        requested: set[str] | None = None
-        if isinstance(body.get("job_ids"), list):
-            requested = {str(j) for j in body["job_ids"]}
 
         with jobs_lock:
             paths = [
@@ -1079,13 +1080,12 @@ def create_app(
                 if job.user_id == uid
                 and job.status == JOB_DONE
                 and job.uir_path is not None
-                and (requested is None or job.job_id in requested)
+                and (job_ids is None or job.job_id in job_ids)
             ]
 
         if not paths:
-            # Same key set as every other /api/chat response: a client that
-            # reads `cited` should not have to special-case this branch.
-            return jsonify({
+            # Same key set as a successful answer so no caller special-cases it.
+            return {
                 "answer": (
                     "You haven't converted any documents yet. Upload one and "
                     "I'll be able to answer questions about it."
@@ -1095,18 +1095,17 @@ def create_app(
                 "invalid_citations": [],
                 "grounded": False,
                 "model": None,
-            })
+            }, 200
 
-        history = body.get("history") if isinstance(body.get("history"), list) else []
         contexts = _chat.retrieve(paths, message)
         result = _chat.answer(message, contexts, history=history)
 
         if not result["success"]:
             # The model call failed (missing key, upstream 5xx). Surface it
             # rather than inventing a reply.
-            return jsonify({"error": result["error"]}), 502
+            return {"error": result["error"]}, 502
 
-        return jsonify({
+        return {
             "answer": result["answer"],
             "citations": result["citations"],
             # Which passages the answer actually cites, and any numbers the
@@ -1116,7 +1115,126 @@ def create_app(
             "invalid_citations": result.get("invalid_citations", []),
             "grounded": result.get("grounded", False),
             "model": result.get("model"),
+        }, 200
+
+    @app.post("/api/chat")
+    @login_required
+    def api_chat() -> ResponseReturnValue:
+        """Answer a question grounded in the caller's converted documents.
+
+        Retrieval spans every ``done`` job the caller owns, unless the
+        body narrows it with ``job_ids``.
+        """
+        body = _json_body()
+        message = (body.get("message") or "").strip()
+        if not message:
+            return jsonify({"error": "message is required"}), 400
+
+        uid = request.user["id"]  # type: ignore[attr-defined]
+        job_ids: set[str] | None = None
+        if isinstance(body.get("job_ids"), list):
+            job_ids = {str(j) for j in body["job_ids"]}
+        history_raw = body.get("history")
+        history: list[Any] = history_raw if isinstance(history_raw, list) else []
+
+        payload, status = _grounded_answer(uid, message, history, job_ids=job_ids)
+        return jsonify(payload), status
+
+    # -------- conversations (Chats panel) -------------------------------
+
+    @app.get("/api/conversations")
+    @login_required
+    def api_conversations_list() -> ResponseReturnValue:
+        uid = request.user["id"]  # type: ignore[attr-defined]
+        return jsonify({"conversations": conversations.list_for_user(uid)})
+
+    @app.post("/api/conversations")
+    @login_required
+    def api_conversations_create() -> ResponseReturnValue:
+        uid = request.user["id"]  # type: ignore[attr-defined]
+        body = _json_body()
+        convo = conversations.create(uid, title=body.get("title") or "")
+        return jsonify({"conversation": convo}), 201
+
+    @app.delete("/api/conversations/<int:cid>")
+    @login_required
+    def api_conversations_delete(cid: int) -> ResponseReturnValue:
+        uid = request.user["id"]  # type: ignore[attr-defined]
+        # 404 (not 403) on someone else's id: never confirm it exists.
+        if not conversations.delete(uid, cid):
+            abort(404, description="conversation not found")
+        return jsonify({"ok": True})
+
+    @app.get("/api/conversations/<int:cid>/messages")
+    @login_required
+    def api_conversation_messages(cid: int) -> ResponseReturnValue:
+        uid = request.user["id"]  # type: ignore[attr-defined]
+        convo = conversations.get(uid, cid)
+        if convo is None:
+            abort(404, description="conversation not found")
+        return jsonify({
+            "conversation": convo,
+            "messages": conversations.list_messages(cid),
         })
+
+    @app.post("/api/conversations/<int:cid>/messages")
+    @login_required
+    def api_conversation_send(cid: int) -> ResponseReturnValue:
+        """Append the caller's message; run the model when it is a command.
+
+        A plain message is stored as a note and echoed back. A message
+        beginning with the ``gemini:`` trigger is stored verbatim, then its
+        remainder is answered from the caller's own documents and the reply
+        is stored as an ``assistant`` message. The user message is persisted
+        either way, so a model outage never loses what the user typed.
+        """
+        uid = request.user["id"]  # type: ignore[attr-defined]
+        convo = conversations.get(uid, cid)
+        if convo is None:
+            abort(404, description="conversation not found")
+
+        body = _json_body()
+        text = (body.get("text") or "").strip()
+        if not text:
+            return jsonify({"error": "text is required"}), 400
+
+        question = _gemini_question(text)
+        if question is not None and not question:
+            return jsonify({"error": "Add a question after 'gemini:'."}), 400
+
+        user_msg = conversations.add_message(cid, "user", text)
+        conversations.autotitle_if_default(cid, text)
+
+        if question is None:
+            # Plain note -- nothing to answer.
+            return jsonify({"user_message": user_msg, "reply": None})
+
+        # Build model history from this thread's prior Q&A only: assistant
+        # replies and the (stripped) gemini questions that prompted them.
+        # Plain notes are not part of the dialogue and are left out.
+        history: list[dict[str, Any]] = []
+        for m in conversations.list_messages(cid):
+            if m["id"] == user_msg["id"]:
+                continue
+            if m["role"] == "assistant":
+                history.append({"role": "assistant", "content": m["content"]})
+            else:
+                q = _gemini_question(m["content"])
+                if q:
+                    history.append({"role": "user", "content": q})
+
+        payload, status = _grounded_answer(uid, question, history)
+        if status != 200:
+            # Model failed. The user message is already saved; surface the
+            # error without fabricating an assistant reply.
+            return jsonify({"user_message": user_msg, "error": payload.get("error")}), 502
+
+        reply = conversations.add_message(
+            cid, "assistant", payload["answer"],
+            citations=payload.get("cited") or payload.get("citations") or [],
+            grounded=bool(payload.get("grounded")),
+        )
+        return jsonify({"user_message": user_msg, "reply": reply})
 
     @app.errorhandler(400)
     @app.errorhandler(401)
@@ -1148,6 +1266,27 @@ def _advance(
         job.status = status
         job.progress_stage = stage
         job.progress_percent = max(0, min(100, int(percent)))
+
+
+#: The Chats panel's inline-assistant trigger. A message whose first
+#: non-space characters are ``gemini:`` (any case) is a command: the text
+#: after the colon is answered from the caller's documents. The keyword is
+#: literally "gemini" by product request, even though the backend model is
+#: Fireworks -- it is the user-facing invocation word, not a model id.
+_GEMINI_PREFIX = re.compile(r"^\s*gemini:\s*", re.IGNORECASE)
+
+
+def _gemini_question(text: str) -> str | None:
+    """Return the question after a ``gemini:`` trigger, else ``None``.
+
+    ``None`` means "not a command, store as a plain note". An empty string
+    means "was a command but nothing followed the colon" -- the caller
+    rejects that rather than sending the model an empty prompt.
+    """
+    m = _GEMINI_PREFIX.match(text or "")
+    if not m:
+        return None
+    return text[m.end():].strip()
 
 
 #: Hosts whose traffic never leaves the machine.

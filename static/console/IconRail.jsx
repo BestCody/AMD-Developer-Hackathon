@@ -77,17 +77,28 @@ function IconRail({ active, onChange, user, onLogout }) {
 
       <div style={{ flex: 1 }} />
 
-      <div
-        title={user ? user.email : ""}
+      {/* The profile avatar opens the Chats panel, matching the design kit's
+          "Chats -- tapped from the profile avatar". It doubles as the active
+          indicator for that tab. */}
+      <button
+        onClick={() => onChange("chats")}
+        aria-label="Chats"
+        aria-current={active === "chats"}
+        title={user ? `${user.email} -- Chats` : "Chats"}
         style={{
-          width: 36, height: 36, borderRadius: "50%",
-          background: "var(--gray-700)", color: "var(--white)",
+          width: 40, height: 40, borderRadius: "50%",
+          background: active === "chats" ? "var(--accent-primary)" : "var(--gray-700)",
+          color: "var(--white)", border: active === "chats" ? "2px solid var(--on-accent)" : "2px solid transparent",
           display: "flex", alignItems: "center", justifyContent: "center",
-          fontSize: 14, fontWeight: 600, marginBottom: 4,
+          fontSize: 14, fontWeight: 600, marginBottom: 4, cursor: "pointer",
+          transition: "background var(--duration-fast) ease, transform var(--duration-press) var(--ease-standard)",
         }}
+        onMouseDown={(e) => (e.currentTarget.style.transform = "scale(var(--scale-press))")}
+        onMouseUp={(e) => (e.currentTarget.style.transform = "scale(1)")}
+        onMouseLeave={(e) => (e.currentTarget.style.transform = "scale(1)")}
       >
         {initial}
-      </div>
+      </button>
       <button
         onClick={onLogout}
         style={{

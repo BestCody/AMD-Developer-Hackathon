@@ -190,7 +190,10 @@ def test_no_live_references_to_the_retired_prototype_helpers():
     components explain what `pickFakeFiles` used to do and why it is gone. Only
     live code counts, so comments and string literals are stripped first.
     """
-    retired = ["pickFakeFiles", "ChatsPanel", "MONADLABS_FAKE"]
+    # NB: ChatsPanel was on this list while it was a mock. It is now a real,
+    # backend-wired component (static/console/ChatsPanel.jsx -> /api/conversations),
+    # so it is deliberately no longer retired.
+    retired = ["pickFakeFiles", "MONADLABS_FAKE"]
     for jsx in _JSX_FILES:
         code = _strip_comments_and_strings(_read(jsx))
         for name in retired:
