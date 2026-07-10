@@ -159,7 +159,7 @@ function App() {
         />
       )}
       {tab === "copilot" && <CopilotChat files={files} />}
-      {tab === "chats" && <ChatsPanel />}
+      {tab === "chats" && <ChatsPanel user={user} />}
     </div>
   );
 }

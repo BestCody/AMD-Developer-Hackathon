@@ -1,7 +1,8 @@
 """tests/test_conversations.py -- ConversationStore unit tests (no web layer).
 
-Covers persistence, per-user ownership scoping, message roles/citations, and
-the auto-title-on-first-message behaviour. No Flask, no model, no network.
+Covers the multi-user model: threads defined by email membership, per-member
+access, reuse of an existing 1:1 thread, message senders and roles, and
+leave-then-cascade. No Flask, no model, no network.
 """
 from __future__ import annotations
 
@@ -9,9 +10,13 @@ import pytest
 
 from uir_pipeline.conversations import (
     MAX_MESSAGE_LEN,
-    MAX_TITLE_LEN,
+    ConversationError,
     ConversationStore,
 )
+
+ALICE = "alice@example.com"
+BOB = "bob@example.com"
+CAROL = "carol@example.com"
 
 
 @pytest.fixture()
@@ -19,136 +24,172 @@ def store(tmp_path):
     return ConversationStore(tmp_path / "monadlabs.db")
 
 
-class TestConversations:
-    def test_create_and_list(self, store):
-        c = store.create(1, "First")
-        assert c["title"] == "First"
-        assert c["message_count"] == 0
-        listed = store.list_for_user(1)
-        assert [x["id"] for x in listed] == [c["id"]]
+class TestCreate:
+    def test_create_makes_a_two_member_thread(self, store):
+        convo, created = store.create_with(ALICE, BOB)
+        assert created is True
+        assert set(convo["members"]) == {ALICE, BOB}
+        # peer_email is relative to the viewer passed in.
+        assert convo["peer_email"] == BOB
 
-    def test_blank_title_falls_back_to_default(self, store):
-        c = store.create(1, "   ")
-        assert c["title"] == "New conversation"
+    def test_create_is_case_insensitive_and_reuses(self, store):
+        first, c1 = store.create_with(ALICE, BOB)
+        second, c2 = store.create_with(ALICE, "BOB@EXAMPLE.COM")
+        assert c1 is True and c2 is False
+        assert first["id"] == second["id"], "same pair must not spawn a second thread"
 
-    def test_title_is_truncated(self, store):
-        c = store.create(1, "x" * 500)
-        assert len(c["title"]) == MAX_TITLE_LEN
+    def test_either_side_reuses_the_same_thread(self, store):
+        first, _ = store.create_with(ALICE, BOB)
+        # Bob starting a chat with Alice lands in the existing thread.
+        second, created = store.create_with(BOB, ALICE)
+        assert created is False
+        assert second["id"] == first["id"]
 
-    def test_list_is_scoped_per_user(self, store):
-        store.create(1, "alice-thread")
-        store.create(2, "bob-thread")
-        assert [c["title"] for c in store.list_for_user(1)] == ["alice-thread"]
-        assert [c["title"] for c in store.list_for_user(2)] == ["bob-thread"]
+    def test_rejects_self_chat(self, store):
+        with pytest.raises(ConversationError, match="yourself"):
+            store.create_with(ALICE, "ALICE@example.com")
 
-    def test_get_enforces_ownership(self, store):
-        c = store.create(1, "mine")
-        assert store.get(1, c["id"]) is not None
-        # Another user cannot fetch it even with the right id.
-        assert store.get(2, c["id"]) is None
+    def test_rejects_invalid_peer(self, store):
+        with pytest.raises(ConversationError, match="valid email"):
+            store.create_with(ALICE, "not-an-email")
 
-    def test_get_missing_returns_none(self, store):
-        assert store.get(1, 999999) is None
 
-    def test_delete_enforces_ownership(self, store):
-        c = store.create(1, "mine")
-        # Wrong user cannot delete.
-        assert store.delete(2, c["id"]) is False
-        assert store.get(1, c["id"]) is not None
-        # Owner can.
-        assert store.delete(1, c["id"]) is True
-        assert store.get(1, c["id"]) is None
+class TestMembershipAccess:
+    def test_list_shows_only_your_threads(self, store):
+        store.create_with(ALICE, BOB)
+        store.create_with(CAROL, BOB)  # Bob is in both; Alice in one
+        alice_threads = store.list_for_email(ALICE)
+        assert len(alice_threads) == 1
+        assert alice_threads[0]["peer_email"] == BOB
+        assert len(store.list_for_email(BOB)) == 2
 
-    def test_delete_cascades_to_messages(self, store):
-        c = store.create(1, "mine")
-        store.add_message(c["id"], "user", "hello")
-        store.add_message(c["id"], "assistant", "hi", grounded=True)
-        assert len(store.list_messages(c["id"])) == 2
-        store.delete(1, c["id"])
-        # Messages must not survive their conversation.
-        assert store.list_messages(c["id"]) == []
+    def test_both_members_see_the_same_thread(self, store):
+        convo, _ = store.create_with(ALICE, BOB)
+        assert store.get_for_email(ALICE, convo["id"]) is not None
+        assert store.get_for_email(BOB, convo["id"]) is not None
+        # peer is computed relative to each viewer.
+        assert store.get_for_email(ALICE, convo["id"])["peer_email"] == BOB
+        assert store.get_for_email(BOB, convo["id"])["peer_email"] == ALICE
 
-    def test_list_orders_by_recent_activity(self, store):
-        a = store.create(1, "a")
-        b = store.create(1, "b")
-        # Touch `a` after `b` by adding a message -> a should sort first.
-        store.add_message(a["id"], "user", "bump")
-        order = [c["id"] for c in store.list_for_user(1)]
-        assert order[0] == a["id"] and order[1] == b["id"]
+    def test_non_member_cannot_access(self, store):
+        convo, _ = store.create_with(ALICE, BOB)
+        assert store.get_for_email(CAROL, convo["id"]) is None
+
+    def test_leave_removes_only_your_seat(self, store):
+        convo, _ = store.create_with(ALICE, BOB)
+        assert store.leave(ALICE, convo["id"]) is True
+        # Alice is gone; Bob still has it.
+        assert store.get_for_email(ALICE, convo["id"]) is None
+        assert store.get_for_email(BOB, convo["id"]) is not None
+
+    def test_leave_by_non_member_is_false(self, store):
+        convo, _ = store.create_with(ALICE, BOB)
+        assert store.leave(CAROL, convo["id"]) is False
+
+    def test_last_leave_deletes_thread_and_messages(self, store):
+        convo, _ = store.create_with(ALICE, BOB)
+        store.add_message(convo["id"], "user", "hi", sender_email=ALICE)
+        store.leave(ALICE, convo["id"])
+        store.leave(BOB, convo["id"])
+        # Nobody left -> thread and its messages are gone.
+        assert store.get_for_email(ALICE, convo["id"]) is None
+        assert store.list_messages(convo["id"]) == []
 
 
 class TestMessages:
-    def test_add_and_list_messages(self, store):
-        c = store.create(1)
-        store.add_message(c["id"], "user", "gemini: what is X")
-        store.add_message(
-            c["id"], "assistant", "X is Y",
-            citations=[{"doc_title": "paper", "page": 3}], grounded=True,
-        )
-        msgs = store.list_messages(c["id"])
-        assert [m["role"] for m in msgs] == ["user", "assistant"]
-        assert msgs[1]["citations"] == [{"doc_title": "paper", "page": 3}]
-        assert msgs[1]["grounded"] is True
+    def test_user_message_records_sender(self, store):
+        convo, _ = store.create_with(ALICE, BOB)
+        m = store.add_message(convo["id"], "user", "hello", sender_email=ALICE)
+        assert m["sender_email"] == ALICE
+        assert m["role"] == "user"
 
-    def test_plain_note_has_no_citations_or_grounded(self, store):
-        c = store.create(1)
-        m = store.add_message(c["id"], "user", "just a note")
-        assert m["citations"] == []
-        assert m["grounded"] is None
+    def test_assistant_message_has_no_sender(self, store):
+        convo, _ = store.create_with(ALICE, BOB)
+        m = store.add_message(convo["id"], "assistant", "grounded answer",
+                              citations=[{"doc_title": "p", "page": 1}], grounded=True)
+        assert m["sender_email"] is None
+        assert m["citations"] == [{"doc_title": "p", "page": 1}]
+        assert m["grounded"] is True
+
+    def test_user_message_requires_a_sender(self, store):
+        convo, _ = store.create_with(ALICE, BOB)
+        with pytest.raises(ValueError, match="sender"):
+            store.add_message(convo["id"], "user", "hi")
 
     def test_invalid_role_raises(self, store):
-        c = store.create(1)
+        convo, _ = store.create_with(ALICE, BOB)
         with pytest.raises(ValueError, match="role"):
-            store.add_message(c["id"], "system", "nope")
+            store.add_message(convo["id"], "system", "nope", sender_email=ALICE)
 
-    def test_message_content_is_capped(self, store):
-        c = store.create(1)
-        m = store.add_message(c["id"], "user", "y" * (MAX_MESSAGE_LEN + 1000))
+    def test_messages_are_ordered_and_visible_to_both(self, store):
+        convo, _ = store.create_with(ALICE, BOB)
+        store.add_message(convo["id"], "user", "from alice", sender_email=ALICE)
+        store.add_message(convo["id"], "user", "from bob", sender_email=BOB)
+        msgs = store.list_messages(convo["id"])
+        assert [m["content"] for m in msgs] == ["from alice", "from bob"]
+        assert [m["sender_email"] for m in msgs] == [ALICE, BOB]
+
+    def test_content_is_capped(self, store):
+        convo, _ = store.create_with(ALICE, BOB)
+        m = store.add_message(convo["id"], "user", "y" * (MAX_MESSAGE_LEN + 500), sender_email=ALICE)
         assert len(m["content"]) == MAX_MESSAGE_LEN
 
-    def test_adding_a_message_bumps_updated_at(self, store):
-        c = store.create(1)
-        before = store.get(1, c["id"])["updated_at"]
-        store.add_message(c["id"], "user", "hello")
-        after = store.get(1, c["id"])["updated_at"]
-        assert after >= before
-
     def test_list_preview_reflects_last_message(self, store):
-        c = store.create(1)
-        store.add_message(c["id"], "user", "first")
-        store.add_message(c["id"], "assistant", "second answer", grounded=True)
-        row = store.list_for_user(1)[0]
-        assert row["preview"] == "second answer"
+        convo, _ = store.create_with(ALICE, BOB)
+        store.add_message(convo["id"], "user", "first", sender_email=ALICE)
+        store.add_message(convo["id"], "assistant", "the answer", grounded=True)
+        row = store.list_for_email(ALICE)[0]
+        assert row["preview"] == "the answer"
         assert row["last_role"] == "assistant"
         assert row["message_count"] == 2
 
-
-class TestAutoTitle:
-    def test_autotitle_sets_from_first_message_when_default(self, store):
-        c = store.create(1)  # default title
-        store.autotitle_if_default(c["id"], "Summarize the Q3 report")
-        assert store.get(1, c["id"])["title"] == "Summarize the Q3 report"
-
-    def test_autotitle_does_not_overwrite_a_custom_title(self, store):
-        c = store.create(1, "My named thread")
-        store.autotitle_if_default(c["id"], "something else")
-        assert store.get(1, c["id"])["title"] == "My named thread"
-
-    def test_autotitle_ignores_blank(self, store):
-        c = store.create(1)
-        store.autotitle_if_default(c["id"], "   ")
-        assert store.get(1, c["id"])["title"] == "New conversation"
-
-    def test_autotitle_truncates(self, store):
-        c = store.create(1)
-        store.autotitle_if_default(c["id"], "z" * 500)
-        assert len(store.get(1, c["id"])["title"]) == MAX_TITLE_LEN
+    def test_activity_bumps_thread_to_top(self, store):
+        a, _ = store.create_with(ALICE, BOB)
+        b, _ = store.create_with(ALICE, CAROL)
+        store.add_message(a["id"], "user", "bump", sender_email=ALICE)
+        order = [c["id"] for c in store.list_for_email(ALICE)]
+        assert order[0] == a["id"]
 
 
 def test_two_stores_share_the_tables(tmp_path):
-    """A second store on the same file sees the first's data (one DB file)."""
     db = tmp_path / "monadlabs.db"
     s1 = ConversationStore(db)
-    c = s1.create(7, "persisted")
+    convo, _ = s1.create_with(ALICE, BOB)
     s2 = ConversationStore(db)
-    assert [x["id"] for x in s2.list_for_user(7)] == [c["id"]]
+    assert [c["id"] for c in s2.list_for_email(ALICE)] == [convo["id"]]
+
+
+def test_migrates_away_from_the_legacy_single_owner_schema(tmp_path):
+    """A DB carrying the first-generation (user_id) tables is rebuilt.
+
+    ``CREATE TABLE IF NOT EXISTS`` would otherwise leave the old
+    ``user_id NOT NULL`` table in place and every insert would fail.
+    """
+    import sqlite3
+
+    db = tmp_path / "monadlabs.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE conversations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            title TEXT NOT NULL DEFAULT 'New conversation',
+            created_at REAL NOT NULL, updated_at REAL NOT NULL
+        );
+        CREATE TABLE conversation_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id INTEGER NOT NULL,
+            role TEXT NOT NULL, content TEXT NOT NULL, created_at REAL NOT NULL
+        );
+        INSERT INTO conversations (user_id, title, created_at, updated_at)
+        VALUES (1, 'old note', 0, 0);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    # Constructing the store must migrate, not raise.
+    store = ConversationStore(db)
+    convo, created = store.create_with(ALICE, BOB)  # would fail on the old schema
+    assert created is True
+    assert set(convo["members"]) == {ALICE, BOB}

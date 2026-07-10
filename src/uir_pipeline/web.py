@@ -1145,31 +1145,43 @@ def create_app(
     @app.get("/api/conversations")
     @login_required
     def api_conversations_list() -> ResponseReturnValue:
-        uid = request.user["id"]  # type: ignore[attr-defined]
-        return jsonify({"conversations": conversations.list_for_user(uid)})
+        email = request.user["email"]  # type: ignore[attr-defined]
+        return jsonify({"conversations": conversations.list_for_email(email)})
 
     @app.post("/api/conversations")
     @login_required
     def api_conversations_create() -> ResponseReturnValue:
-        uid = request.user["id"]  # type: ignore[attr-defined]
+        """Start (or reopen) a 1:1 thread with the person at ``peer_email``.
+
+        The peer need not have an account: membership is by email, so they
+        see the thread when they sign up with that address. We do not check
+        whether the address is registered, both to keep the flow simple and
+        to avoid turning this into an account-enumeration oracle.
+        """
+        from uir_pipeline.conversations import ConversationError
+
+        email = request.user["email"]  # type: ignore[attr-defined]
         body = _json_body()
-        convo = conversations.create(uid, title=body.get("title") or "")
-        return jsonify({"conversation": convo}), 201
+        try:
+            convo, created = conversations.create_with(email, body.get("peer_email") or "")
+        except ConversationError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify({"conversation": convo}), (201 if created else 200)
 
     @app.delete("/api/conversations/<int:cid>")
     @login_required
     def api_conversations_delete(cid: int) -> ResponseReturnValue:
-        uid = request.user["id"]  # type: ignore[attr-defined]
-        # 404 (not 403) on someone else's id: never confirm it exists.
-        if not conversations.delete(uid, cid):
+        email = request.user["email"]  # type: ignore[attr-defined]
+        # 404 (not 403) for a non-member id: never confirm it exists.
+        if not conversations.leave(email, cid):
             abort(404, description="conversation not found")
         return jsonify({"ok": True})
 
     @app.get("/api/conversations/<int:cid>/messages")
     @login_required
     def api_conversation_messages(cid: int) -> ResponseReturnValue:
-        uid = request.user["id"]  # type: ignore[attr-defined]
-        convo = conversations.get(uid, cid)
+        email = request.user["email"]  # type: ignore[attr-defined]
+        convo = conversations.get_for_email(email, cid)
         if convo is None:
             abort(404, description="conversation not found")
         return jsonify({
@@ -1180,16 +1192,18 @@ def create_app(
     @app.post("/api/conversations/<int:cid>/messages")
     @login_required
     def api_conversation_send(cid: int) -> ResponseReturnValue:
-        """Append the caller's message; run the model when it is a command.
+        """Post a message to a thread the caller is a member of.
 
-        A plain message is stored as a note and echoed back. A message
-        beginning with the ``gemini:`` trigger is stored verbatim, then its
-        remainder is answered from the caller's own documents and the reply
-        is stored as an ``assistant`` message. The user message is persisted
-        either way, so a model outage never loses what the user typed.
+        A plain message is stored as the caller's message (the other member
+        sees it). A message beginning with the ``gemini:`` trigger is stored
+        verbatim, then its remainder is answered from the *sender's* own
+        documents and the reply is stored as a shared ``assistant`` message
+        both members see. The user message is persisted before the model
+        runs, so a model outage never loses what the user typed.
         """
+        email = request.user["email"]  # type: ignore[attr-defined]
         uid = request.user["id"]  # type: ignore[attr-defined]
-        convo = conversations.get(uid, cid)
+        convo = conversations.get_for_email(email, cid)
         if convo is None:
             abort(404, description="conversation not found")
 
@@ -1202,16 +1216,15 @@ def create_app(
         if question is not None and not question:
             return jsonify({"error": "Add a question after 'gemini:'."}), 400
 
-        user_msg = conversations.add_message(cid, "user", text)
-        conversations.autotitle_if_default(cid, text)
+        user_msg = conversations.add_message(cid, "user", text, sender_email=email)
 
         if question is None:
-            # Plain note -- nothing to answer.
+            # Ordinary message between the two people -- nothing to answer.
             return jsonify({"user_message": user_msg, "reply": None})
 
-        # Build model history from this thread's prior Q&A only: assistant
-        # replies and the (stripped) gemini questions that prompted them.
-        # Plain notes are not part of the dialogue and are left out.
+        # Model history: this thread's prior gemini exchanges only -- the
+        # stripped questions and the assistant answers. Ordinary person-to-
+        # person messages are not part of the model dialogue.
         history: list[dict[str, Any]] = []
         for m in conversations.list_messages(cid):
             if m["id"] == user_msg["id"]:

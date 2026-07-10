@@ -1,21 +1,21 @@
-/* ChatsPanel.jsx -- persistent chat threads, opened from the profile avatar.
+/* ChatsPanel.jsx -- conversations with other people, opened from the profile avatar.
  *
- * This replaces the design kit's mock. That version seeded three fictional
- * people (Priya Shah, Marcus Lee, Data Team) into `useState` with a
- * `nextConvoId++` counter and never touched a backend -- opening a thread
- * showed hardcoded lines. Shipping fake conversations in a working product
- * reads as broken, so the mock was dropped in the port.
+ * This replaces the design kit's mock, which seeded three fictional people
+ * (Priya Shah, Marcus Lee, Data Team) into `useState` with a `nextConvoId++`
+ * counter and never touched a backend.
  *
- * This is the real thing:
- *   - Threads and messages persist per user in SQLite (see
- *     uir_pipeline/conversations.py); they survive reloads and restarts.
- *   - A message that starts with "gemini:" is a command: the text after the
- *     colon is answered from the caller's own converted documents (the same
- *     grounded retrieval /api/chat uses), and the reply is stored with the
- *     citations it was given. Anything else is a plain note in the thread.
+ * Real behaviour:
+ *   - A conversation is a 1:1 thread between two people, each identified by
+ *     email. You start one from the "+" screen by entering an address (they
+ *     see the thread when they sign up with it). Both members share the
+ *     messages; the thread polls so the other person's replies appear.
+ *   - Within a thread, a message that starts with "gemini:" is a command:
+ *     the remainder is answered from *your* converted documents (the same
+ *     grounded retrieval the Copilot tab uses) and the reply is posted into
+ *     the shared thread, so both people see the question and the answer.
  *
- * The "gemini:" keyword is the product's chosen invocation word; the model
- * behind it is Fireworks, the same one the Copilot tab uses.
+ * "gemini:" is the product's chosen invocation word; the model behind it is
+ * Fireworks, the same one Copilot uses.
  *
  * IIFE-wrapped: see app.jsx.
  */
@@ -23,11 +23,19 @@
 (function () {
 
 const GEMINI_HINT = 'Message, or type "gemini: <question>" to ask your documents';
+const POLL_MS = 4000;
 
-/** Strip a leading "gemini:" (any case) -> the question, or null for a note. */
+/** Strip a leading "gemini:" (any case) -> the question, or null for a message. */
 function geminiQuestion(text) {
   const m = /^\s*gemini:\s*/i.exec(text || "");
-  return m ? (text.slice(m[0].length)).trim() : null;
+  return m ? text.slice(m[0].length).trim() : null;
+}
+
+/** A display name from an email: the local part, else the raw string. */
+function nameOf(email) {
+  if (!email) return "Unknown";
+  const local = email.split("@")[0];
+  return local.charAt(0).toUpperCase() + local.slice(1);
 }
 
 function Citations({ items }) {
@@ -63,23 +71,17 @@ function Citations({ items }) {
   );
 }
 
-function GeminiAvatar() {
-  return (
-    <div style={{
-      width: 22, height: 22, borderRadius: "50%", background: "var(--accent-primary)", color: "#fff",
-      display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginBottom: 2,
-    }}>
-      <i data-lucide="sparkles" style={{ width: 12, height: 12 }}></i>
-    </div>
-  );
-}
-
-function Message({ m }) {
-  const mine = m.role === "user";
+function Message({ m, myEmail }) {
+  const isAssistant = m.role === "assistant";
+  const mine = !isAssistant && (m.sender_email || "").toLowerCase() === myEmail;
   const isCommand = mine && geminiQuestion(m.content) !== null;
   return (
     <div style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start", alignItems: "flex-end", gap: 8 }}>
-      {!mine && <GeminiAvatar />}
+      {isAssistant && (
+        <div style={{ width: 22, height: 22, borderRadius: "50%", background: "var(--accent-primary)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginBottom: 2 }}>
+          <i data-lucide="sparkles" style={{ width: 12, height: 12 }}></i>
+        </div>
+      )}
       <div style={{ maxWidth: "74%" }}>
         <div
           style={{
@@ -88,19 +90,17 @@ function Message({ m }) {
             fontSize: "var(--text-body-size)",
             lineHeight: "var(--text-body-leading)",
             whiteSpace: "pre-wrap",
-            background: mine ? "var(--accent-primary)" : "var(--blue-50)",
+            background: mine ? "var(--accent-primary)" : isAssistant ? "var(--blue-50)" : "var(--gray-100)",
             color: mine ? "var(--on-accent)" : "var(--text-ink)",
           }}
         >
           {m.content}
         </div>
         {isCommand && (
-          <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-muted-48)", textAlign: "right" }}>
-            asked Gemini
-          </div>
+          <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-muted-48)", textAlign: "right" }}>asked Gemini</div>
         )}
-        {!mine && <Citations items={m.citations} />}
-        {!mine && m.grounded === false && (
+        {isAssistant && <Citations items={m.citations} />}
+        {isAssistant && m.grounded === false && (
           <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-muted-48)" }}>
             No passage scored high enough to answer from.
           </div>
@@ -110,20 +110,28 @@ function Message({ m }) {
   );
 }
 
-function ChatsPanel() {
+function ChatsPanel({ user }) {
+  const myEmail = ((user && user.email) || "").toLowerCase();
+  const API = window.MonadLabsAPI;
+
   const [conversations, setConversations] = React.useState(null); // null = loading
   const [listError, setListError] = React.useState("");
   const [search, setSearch] = React.useState("");
 
+  const [showNew, setShowNew] = React.useState(false);
+  const [newEmail, setNewEmail] = React.useState("");
+  const [newError, setNewError] = React.useState("");
+
   const [openId, setOpenId] = React.useState(null);
+  const [peer, setPeer] = React.useState("");
   const [messages, setMessages] = React.useState([]);
   const [threadLoading, setThreadLoading] = React.useState(false);
   const [draft, setDraft] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState("");
   const scrollRef = React.useRef(null);
-
-  const API = window.MonadLabsAPI;
+  const busyRef = React.useRef(false);
+  React.useEffect(() => { busyRef.current = busy; }, [busy]);
 
   React.useEffect(() => { if (window.lucide) window.lucide.createIcons(); });
   React.useEffect(() => {
@@ -145,39 +153,55 @@ function ChatsPanel() {
       setListError(err.message);
     }
   }
-
   React.useEffect(() => { refreshList(); }, []);
 
-  const open = conversations && conversations.find((c) => c.id === openId);
-
-  async function openThread(cid) {
-    setOpenId(cid);
-    setMessages([]);
-    setError("");
-    setThreadLoading(true);
+  async function loadMessages(cid, { quiet } = {}) {
+    if (!quiet) setThreadLoading(true);
     try {
-      const { messages: msgs } = await API.conversationMessages(cid);
+      const { conversation, messages: msgs } = await API.conversationMessages(cid);
+      if (conversation) setPeer(conversation.peer_email || "");
       setMessages(msgs);
     } catch (err) {
       if (bounceIfUnauth(err)) return;
-      setError(err.message);
+      if (!quiet) setError(err.message);
     } finally {
-      setThreadLoading(false);
+      if (!quiet) setThreadLoading(false);
     }
   }
 
-  async function newChat() {
+  function openThread(cid, peerEmail) {
+    setOpenId(cid);
+    setPeer(peerEmail || "");
+    setMessages([]);
+    setError("");
+    setShowNew(false);
+    loadMessages(cid);
+  }
+
+  // Poll the open thread so the other person's messages arrive. Skip while a
+  // send is in flight so an optimistic bubble is never clobbered mid-request.
+  React.useEffect(() => {
+    if (openId == null) return;
+    const t = setInterval(() => { if (!busyRef.current) loadMessages(openId, { quiet: true }); }, POLL_MS);
+    return () => clearInterval(t);
+  }, [openId]);
+
+  async function startChat() {
+    const email = newEmail.trim();
+    if (!email) return;
+    setNewError("");
     try {
-      const { conversation } = await API.createConversation();
-      setConversations((prev) => [conversation, ...(prev || [])]);
-      openThread(conversation.id);
+      const { conversation } = await API.createConversation(email);
+      setNewEmail("");
+      await refreshList();
+      openThread(conversation.id, conversation.peer_email);
     } catch (err) {
       if (bounceIfUnauth(err)) return;
-      setListError(err.message);
+      setNewError(err.message);
     }
   }
 
-  async function removeChat(cid) {
+  async function leaveChat(cid) {
     try {
       await API.deleteConversation(cid);
       setConversations((prev) => (prev || []).filter((c) => c.id !== cid));
@@ -193,33 +217,69 @@ function ChatsPanel() {
     if (!text || busy || openId == null) return;
     setError("");
     setDraft("");
-    // Optimistic user bubble; the server persists it regardless of what the
-    // model does, so this never diverges from what a reload would show.
-    setMessages((m) => [...m, { id: `pending-${Date.now()}`, role: "user", content: text }]);
-    setBusy(true);
     const isCommand = geminiQuestion(text) !== null;
+    setMessages((m) => [...m, { id: `pending-${Date.now()}`, role: "user", sender_email: myEmail, content: text }]);
+    setBusy(true);
     try {
       const res = await API.sendConversationMessage(openId, text);
-      // Swap the optimistic bubble for the persisted one, then append a reply.
       setMessages((m) => {
         const kept = m.filter((x) => typeof x.id !== "string" || !x.id.startsWith("pending-"));
         const next = [...kept, res.user_message];
         if (res.reply) next.push(res.reply);
         return next;
       });
-      refreshList(); // preview + auto-title may have changed
+      refreshList();
     } catch (err) {
       if (bounceIfUnauth(err)) return;
-      // The user message is saved server-side even on model failure; keep the
-      // optimistic bubble and show the error rather than faking an answer.
       setError(isCommand ? `Gemini couldn't answer: ${err.message}` : err.message);
     } finally {
       setBusy(false);
     }
   }
 
+  // ---- new-chat screen ----------------------------------------------------
+  if (showNew) {
+    return (
+      <div style={{ maxWidth: 480, margin: "60px auto", width: "100%", display: "flex", flexDirection: "column", gap: 20, padding: "0 8px" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", position: "relative", gap: 12 }}>
+          <button
+            onClick={() => { setShowNew(false); setNewError(""); }}
+            aria-label="Back"
+            style={{ border: "1px solid var(--border-hairline)", background: "var(--surface-canvas)", cursor: "pointer", color: "var(--text-ink)", display: "flex", alignItems: "center", justifyContent: "center", width: 36, height: 36, borderRadius: "var(--radius-full)", flexShrink: 0, position: "absolute", left: 0 }}
+          >
+            <i data-lucide="chevron-left" style={{ width: 20, height: 20 }}></i>
+          </button>
+          <div style={{ fontFamily: "var(--font-display)", fontSize: "var(--text-tagline-size)", fontWeight: 600, color: "var(--text-ink)" }}>New chat</div>
+        </div>
+        <div style={{ fontSize: "var(--text-caption-size)", color: "var(--text-muted-48)" }}>
+          Enter the email of the person you want to chat with.
+        </div>
+        <input
+          type="email"
+          value={newEmail}
+          onChange={(e) => setNewEmail(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && startChat()}
+          placeholder="name@company.com"
+          autoFocus
+          style={{ width: "100%", fontFamily: "var(--font-text)", fontSize: "var(--text-body-size)", color: "var(--text-ink)", background: "var(--surface-canvas)", border: "1px solid var(--border-hairline)", borderRadius: "var(--radius-sm)", height: 48, padding: "0 16px", outline: "none", boxSizing: "border-box" }}
+        />
+        {newError && (
+          <div role="alert" style={{ background: "var(--status-error-bg)", color: "var(--status-error)", borderRadius: "var(--radius-sm)", padding: "10px 14px", fontSize: "var(--text-caption-size)" }}>
+            {newError}
+          </div>
+        )}
+        <button
+          onClick={startChat}
+          style={{ width: "100%", background: "var(--surface-black)", color: "#fff", border: "none", borderRadius: "var(--radius-pill)", height: 48, fontFamily: "var(--font-text)", fontSize: "var(--text-body-size)", fontWeight: 500, cursor: "pointer" }}
+        >
+          Start chat
+        </button>
+      </div>
+    );
+  }
+
   // ---- thread view --------------------------------------------------------
-  if (openId != null && open) {
+  if (openId != null) {
     return (
       <div style={{ display: "flex", flexDirection: "column", height: "100%", maxWidth: 720, margin: "0 auto", width: "100%" }}>
         <div style={{ padding: "28px 8px 16px", display: "flex", alignItems: "center", gap: 12 }}>
@@ -230,12 +290,12 @@ function ChatsPanel() {
           >
             <i data-lucide="chevron-left" style={{ width: 20, height: 20 }}></i>
           </button>
-          <div style={{ fontFamily: "var(--font-display)", fontSize: "var(--text-tagline-size)", fontWeight: 600, color: "var(--text-ink)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {open.title}
+          <div title={peer} style={{ fontFamily: "var(--font-display)", fontSize: "var(--text-tagline-size)", fontWeight: 600, color: "var(--text-ink)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {nameOf(peer)}
           </div>
           <button
-            onClick={() => removeChat(open.id)}
-            aria-label="Delete conversation"
+            onClick={() => leaveChat(openId)}
+            aria-label="Leave conversation"
             style={{ border: "none", background: "transparent", cursor: "pointer", color: "var(--text-muted-48)", display: "flex", alignItems: "center", justifyContent: "center", width: 36, height: 36, flexShrink: 0 }}
           >
             <i data-lucide="trash-2" style={{ width: 18, height: 18 }}></i>
@@ -243,20 +303,18 @@ function ChatsPanel() {
         </div>
 
         <div ref={scrollRef} style={{ flex: 1, overflow: "auto", display: "flex", flexDirection: "column", gap: 14, padding: "0 8px 24px" }}>
-          {threadLoading && (
-            <div style={{ color: "var(--text-muted-48)", fontSize: "var(--text-caption-size)" }}>Loading…</div>
-          )}
+          {threadLoading && <div style={{ color: "var(--text-muted-48)", fontSize: "var(--text-caption-size)" }}>Loading…</div>}
           {!threadLoading && messages.length === 0 && (
             <div style={{ color: "var(--text-muted-48)", fontSize: "var(--text-body-size)", marginTop: 8 }}>
-              Nothing here yet. Type a note, or start with <b>gemini:</b> to ask your documents.
+              Say hi to {nameOf(peer)}, or start with <b>gemini:</b> to ask your documents.
             </div>
           )}
-          {messages.map((m) => <Message key={m.id} m={m} />)}
+          {messages.map((m) => <Message key={m.id} m={m} myEmail={myEmail} />)}
 
           {busy && (
             <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--text-muted-48)", fontSize: "var(--text-caption-size)" }}>
               <div className="ap-spin" style={{ width: 14, height: 14, borderRadius: "50%", border: "2px solid var(--gray-200)", borderTopColor: "var(--accent-primary)" }} />
-              {geminiQuestion(draft) !== null ? "Searching your documents…" : "Saving…"}
+              {geminiQuestion(draft) !== null ? "Searching your documents…" : "Sending…"}
             </div>
           )}
           {error && (
@@ -288,7 +346,7 @@ function ChatsPanel() {
 
   // ---- list view ----------------------------------------------------------
   const filtered = (conversations || []).filter((c) =>
-    (c.title || "").toLowerCase().includes(search.toLowerCase())
+    (c.peer_email || "").toLowerCase().includes(search.toLowerCase())
   );
 
   return (
@@ -297,12 +355,12 @@ function ChatsPanel() {
         Chats
       </div>
       <div style={{ padding: "0 8px 18px", fontSize: "var(--text-caption-size)", color: "var(--text-muted-48)" }}>
-        Notes to yourself. Start a line with <b>gemini:</b> to ask your converted documents.
+        Message a teammate by email. Inside a chat, start a line with <b>gemini:</b> to ask your converted documents.
       </div>
 
       <div style={{ padding: "0 8px 16px", display: "flex", gap: 10, alignItems: "center" }}>
         <button
-          onClick={newChat}
+          onClick={() => { setShowNew(true); setNewError(""); }}
           aria-label="New chat"
           style={{ width: 44, height: 44, borderRadius: "var(--radius-full)", flexShrink: 0, border: "1px solid var(--border-hairline)", background: "var(--surface-canvas)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "var(--text-ink)" }}
         >
@@ -313,7 +371,7 @@ function ChatsPanel() {
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search conversations…"
+            placeholder="Search people…"
             style={{ width: "100%", height: 44, fontFamily: "var(--font-text)", fontSize: "var(--text-body-size)", color: "var(--text-ink)", background: "var(--surface-canvas)", border: "1px solid var(--border-hairline)", borderRadius: "var(--radius-pill)", padding: "0 16px 0 40px", outline: "none", boxSizing: "border-box" }}
           />
         </div>
@@ -329,7 +387,7 @@ function ChatsPanel() {
         <div style={{ padding: "8px", color: "var(--text-muted-48)", fontSize: "var(--text-caption-size)" }}>Loading…</div>
       ) : filtered.length === 0 ? (
         <div style={{ padding: "8px", color: "var(--text-muted-48)", fontSize: "var(--text-body-size)" }}>
-          {conversations.length === 0 ? "No conversations yet. Hit + to start one." : "No matches."}
+          {conversations.length === 0 ? "No conversations yet. Hit + to message someone." : "No matches."}
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column" }}>
@@ -340,22 +398,22 @@ function ChatsPanel() {
               style={{ display: "flex", alignItems: "center", gap: 14, padding: "14px 8px", borderBottom: "1px solid var(--border-hairline)" }}
             >
               <button
-                onClick={() => openThread(c.id)}
+                onClick={() => openThread(c.id, c.peer_email)}
                 style={{ display: "flex", alignItems: "center", gap: 14, flex: 1, minWidth: 0, border: "none", background: "transparent", cursor: "pointer", textAlign: "left", padding: 0 }}
               >
                 <div style={{ width: 40, height: 40, borderRadius: "50%", background: "var(--gray-100)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, color: "var(--text-muted-80)" }}>
-                  <i data-lucide="message-square" style={{ width: 18, height: 18 }}></i>
+                  <i data-lucide="user" style={{ width: 18, height: 18 }}></i>
                 </div>
                 <div style={{ overflow: "hidden" }}>
-                  <div style={{ fontSize: "var(--text-body-strong-size)", fontWeight: "var(--text-body-strong-weight)", color: "var(--text-ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.title}</div>
+                  <div style={{ fontSize: "var(--text-body-strong-size)", fontWeight: "var(--text-body-strong-weight)", color: "var(--text-ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={c.peer_email}>{nameOf(c.peer_email)}</div>
                   <div style={{ fontSize: "var(--text-caption-size)", color: c.last_role === "assistant" ? "var(--accent-primary)" : "var(--text-muted-48)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {c.preview || "Empty conversation"}
+                    {c.preview || "No messages yet"}
                   </div>
                 </div>
               </button>
               <button
-                onClick={() => removeChat(c.id)}
-                aria-label="Delete conversation"
+                onClick={() => leaveChat(c.id)}
+                aria-label="Leave conversation"
                 className="ap-file-delete"
                 style={{ border: "none", background: "transparent", cursor: "pointer", color: "var(--text-muted-48)", display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, flexShrink: 0 }}
               >

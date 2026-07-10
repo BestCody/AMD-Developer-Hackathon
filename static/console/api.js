@@ -105,8 +105,9 @@
   // -- conversations (Chats panel) ------------------------------------------
 
   const listConversations = () => request("/api/conversations");
-  const createConversation = (title) =>
-    request("/api/conversations", { method: "POST", body: { title: title || "" } });
+  /** Start (or reopen) a 1:1 thread with the person at `peerEmail`. */
+  const createConversation = (peerEmail) =>
+    request("/api/conversations", { method: "POST", body: { peer_email: peerEmail || "" } });
   const deleteConversation = (cid) =>
     request(`/api/conversations/${encodeURIComponent(cid)}`, { method: "DELETE" });
   const conversationMessages = (cid) =>

@@ -1,22 +1,24 @@
-"""conversations -- persistent chat threads for the console's Chats panel.
+"""conversations -- multi-user chat threads for the console's Chats panel.
 
-Backs the MonadLabs console's Chats panel. Each user owns a list of
-conversation threads; each thread is an append-only log of messages. A
-message the user types is a ``user`` message; when it starts with the
-``gemini:`` trigger the console sends the remainder to the grounded chat
-model and stores the reply as an ``assistant`` message (with the citations
-it was given). Plain messages are just notes in the thread.
+A conversation is a thread between two people, each identified by email. You
+start one by entering someone's address (they need not have an account yet --
+they see the thread the moment they sign up with that email). Both members
+see the same messages.
 
-Storage mirrors :mod:`uir_pipeline.auth`: the same SQLite database file, a
-fresh connection per call (console scale is a handful of users), WAL mode,
-and ownership carried by ``user_id`` on every row. Every read and write is
-scoped to the calling user, so one account can never see or mutate
-another's threads -- the route layer relies on that, not on its own checks.
+Within a thread, a message that starts with ``gemini:`` is a command: the
+console answers its remainder from the *sender's* own converted documents and
+posts the reply into the shared thread, so both members see the question and
+the grounded answer. Anything else is an ordinary message between the two
+people.
 
-This module stores and retrieves; it never calls a model. The web layer
-owns the ``gemini:`` routing and the retrieval/answer step, so this file
-has no dependency on chat, embeddings, or Weaviate and stays cheap to
-import and to test.
+Access is defined by membership, not ownership: every read and write is
+scoped to conversations whose member list contains the caller's email, so a
+user can only ever see or post to threads they are part of. Storage mirrors
+:mod:`uir_pipeline.auth` -- the same SQLite file, a fresh connection per call,
+WAL, and ``ON DELETE CASCADE`` so leaving the last seat drops the thread.
+
+This module stores and retrieves; it never calls a model. The web layer owns
+the ``gemini:`` routing and the retrieval/answer step.
 """
 from __future__ import annotations
 
@@ -27,33 +29,41 @@ import time
 from pathlib import Path
 from typing import Any, Final
 
+from uir_pipeline.auth import normalize_email
+
 logger = logging.getLogger(__name__)
 
 
-#: Longest title / message we store. Titles are truncated for the list view;
-#: messages are capped so a single paste cannot bloat the database.
-MAX_TITLE_LEN: Final[int] = 80
+#: Longest message we store; a single paste cannot bloat the database.
 MAX_MESSAGE_LEN: Final[int] = 8000
 
-_DEFAULT_TITLE: Final[str] = "New conversation"
-
 _VALID_ROLES: Final[frozenset[str]] = frozenset({"user", "assistant"})
+
+
+class ConversationError(Exception):
+    """User-facing conversation failure; the message is safe to show a client."""
 
 
 _SCHEMA: Final[str] = """
 CREATE TABLE IF NOT EXISTS conversations (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id    INTEGER NOT NULL,
-    title      TEXT NOT NULL DEFAULT 'New conversation',
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_conversations_user
-    ON conversations (user_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS conversation_members (
+    conversation_id INTEGER NOT NULL,
+    email           TEXT NOT NULL COLLATE NOCASE,
+    PRIMARY KEY (conversation_id, email),
+    FOREIGN KEY (conversation_id) REFERENCES conversations (id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_members_email
+    ON conversation_members (email);
 
 CREATE TABLE IF NOT EXISTS conversation_messages (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     conversation_id INTEGER NOT NULL,
+    sender_email    TEXT COLLATE NOCASE,
     role            TEXT NOT NULL,
     content         TEXT NOT NULL,
     citations       TEXT,
@@ -67,17 +77,14 @@ CREATE INDEX IF NOT EXISTS idx_messages_conversation
 
 
 def _preview(text: str) -> str:
-    """A single-line, length-capped snippet for the conversation list."""
-    flat = " ".join((text or "").split())
-    return flat[:120]
+    return " ".join((text or "").split())[:120]
 
 
 class ConversationStore:
-    """SQLite-backed conversation + message store, one connection per call.
+    """SQLite-backed conversation store, one connection per call.
 
     Shares the console database file with :class:`~uir_pipeline.auth.UserStore`;
-    each store creates only its own tables (``IF NOT EXISTS``), so construction
-    order does not matter.
+    each store creates only its own tables (``IF NOT EXISTS``).
     """
 
     def __init__(self, db_path: Path) -> None:
@@ -85,64 +92,118 @@ class ConversationStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
+            self._migrate_legacy(conn)
             conn.executescript(_SCHEMA)
+
+    @staticmethod
+    def _migrate_legacy(conn: sqlite3.Connection) -> None:
+        """Drop the first-generation chat tables if present.
+
+        An earlier version modelled conversations as single-owner notes: a
+        ``conversations`` table with a ``user_id NOT NULL`` column and no
+        ``conversation_members``. ``CREATE TABLE IF NOT EXISTS`` would leave
+        that incompatible table in place, so every insert here would fail the
+        old NOT NULL. The two models don't map onto each other (notes-to-self
+        vs a thread between two people), so there is nothing to migrate --
+        drop the legacy chat tables and let the new schema recreate them. The
+        users table is untouched.
+        """
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(conversations)")}
+        if "user_id" in cols:
+            logger.warning(
+                "dropping legacy single-owner conversation tables; the chat "
+                "model changed to multi-user membership and the two are not "
+                "convertible"
+            )
+            conn.execute("DROP TABLE IF EXISTS conversation_messages")
+            conn.execute("DROP TABLE IF EXISTS conversation_members")
+            conn.execute("DROP TABLE IF EXISTS conversations")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=10.0)
         conn.row_factory = sqlite3.Row
-        # ON DELETE CASCADE only fires when foreign keys are enabled, and the
-        # pragma is per-connection. Without it, deleting a conversation would
-        # orphan its messages.
+        # CASCADE only fires with foreign keys on, and the pragma is
+        # per-connection: without it, deleting a conversation orphans its
+        # members and messages.
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
     # -- conversations --------------------------------------------------
 
-    def create(self, user_id: int, title: str = _DEFAULT_TITLE) -> dict[str, Any]:
-        now = time.time()
-        title = (title or "").strip()[:MAX_TITLE_LEN] or _DEFAULT_TITLE
+    def create_with(self, creator_email: str, peer_email: str) -> tuple[dict[str, Any], bool]:
+        """Return the 1:1 thread between these two, creating it if new.
+
+        Returns ``(conversation, created)``. Reuses an existing thread with
+        exactly these two members rather than piling up duplicates. Raises
+        :class:`ConversationError` on a missing/invalid peer or self-chat.
+        """
+        creator = normalize_email(creator_email)
+        peer = normalize_email(peer_email)
+        if "@" not in peer or len(peer) < 3:
+            raise ConversationError("Enter a valid email address.")
+        if peer == creator:
+            raise ConversationError("You can't start a conversation with yourself.")
+
         with self._connect() as conn:
+            existing = conn.execute(
+                """
+                SELECT m1.conversation_id AS cid
+                  FROM conversation_members m1
+                  JOIN conversation_members m2
+                    ON m1.conversation_id = m2.conversation_id
+                 WHERE m1.email = ? AND m2.email = ?
+                   AND (SELECT COUNT(*) FROM conversation_members m3
+                         WHERE m3.conversation_id = m1.conversation_id) = 2
+                 LIMIT 1
+                """,
+                (creator, peer),
+            ).fetchone()
+            if existing is not None:
+                cid = int(existing["cid"])
+                return self._conversation_dict(conn, cid, creator), False
+
+            now = time.time()
             cur = conn.execute(
-                "INSERT INTO conversations (user_id, title, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?)",
-                (int(user_id), title, now, now),
+                "INSERT INTO conversations (created_at, updated_at) VALUES (?, ?)",
+                (now, now),
             )
             cid = int(cur.lastrowid)  # type: ignore[arg-type]
-        return {
-            "id": cid,
-            "title": title,
-            "created_at": now,
-            "updated_at": now,
-            "preview": "",
-            "message_count": 0,
-        }
+            conn.executemany(
+                "INSERT INTO conversation_members (conversation_id, email) VALUES (?, ?)",
+                [(cid, creator), (cid, peer)],
+            )
+            return self._conversation_dict(conn, cid, creator), True
 
-    def list_for_user(self, user_id: int) -> list[dict[str, Any]]:
-        """Conversations for ``user_id``, newest activity first, each with a
-        preview drawn from its most recent message."""
+    def list_for_email(self, email: str) -> list[dict[str, Any]]:
+        """Threads ``email`` is a member of, newest activity first."""
+        email = normalize_email(email)
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT c.id, c.title, c.created_at, c.updated_at,
-                       (SELECT content FROM conversation_messages m
-                         WHERE m.conversation_id = c.id
-                         ORDER BY m.id DESC LIMIT 1) AS last_content,
-                       (SELECT role FROM conversation_messages m
-                         WHERE m.conversation_id = c.id
-                         ORDER BY m.id DESC LIMIT 1) AS last_role,
-                       (SELECT COUNT(*) FROM conversation_messages m
-                         WHERE m.conversation_id = c.id) AS message_count
+                SELECT c.id, c.created_at, c.updated_at,
+                       (SELECT email FROM conversation_members m
+                         WHERE m.conversation_id = c.id AND m.email <> ?
+                         LIMIT 1) AS peer_email,
+                       (SELECT content FROM conversation_messages msg
+                         WHERE msg.conversation_id = c.id
+                         ORDER BY msg.id DESC LIMIT 1) AS last_content,
+                       (SELECT role FROM conversation_messages msg
+                         WHERE msg.conversation_id = c.id
+                         ORDER BY msg.id DESC LIMIT 1) AS last_role,
+                       (SELECT COUNT(*) FROM conversation_messages msg
+                         WHERE msg.conversation_id = c.id) AS message_count
                   FROM conversations c
-                 WHERE c.user_id = ?
+                  JOIN conversation_members me
+                    ON me.conversation_id = c.id AND me.email = ?
                  ORDER BY c.updated_at DESC, c.id DESC
                 """,
-                (int(user_id),),
+                (email, email),
             ).fetchall()
         out: list[dict[str, Any]] = []
         for r in rows:
             out.append({
                 "id": int(r["id"]),
-                "title": r["title"],
+                "peer_email": r["peer_email"] or "",
                 "created_at": r["created_at"],
                 "updated_at": r["updated_at"],
                 "preview": _preview(r["last_content"] or ""),
@@ -151,43 +212,50 @@ class ConversationStore:
             })
         return out
 
-    def get(self, user_id: int, conversation_id: int) -> dict[str, Any] | None:
-        """Return the conversation iff it belongs to ``user_id``, else None.
+    def get_for_email(self, email: str, conversation_id: int) -> dict[str, Any] | None:
+        """Return the thread iff ``email`` is a member, else ``None``.
 
-        Ownership is enforced in the query, so a caller can never fetch a
-        thread they do not own by guessing its id.
+        Membership is the access check, so a non-member can never fetch a
+        thread by guessing its id.
         """
+        email = normalize_email(email)
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT id, title, created_at, updated_at FROM conversations "
-                "WHERE id = ? AND user_id = ?",
-                (int(conversation_id), int(user_id)),
+            member = conn.execute(
+                "SELECT 1 FROM conversation_members WHERE conversation_id = ? AND email = ?",
+                (int(conversation_id), email),
             ).fetchone()
-        return dict(row) if row else None
+            if member is None:
+                return None
+            return self._conversation_dict(conn, int(conversation_id), email)
 
-    def rename(self, user_id: int, conversation_id: int, title: str) -> bool:
-        title = (title or "").strip()[:MAX_TITLE_LEN] or _DEFAULT_TITLE
+    def leave(self, email: str, conversation_id: int) -> bool:
+        """Remove ``email`` from the thread; drop the thread if now empty.
+
+        Returns ``True`` if the caller was a member. Leaving does not delete
+        the other person's copy until the last member is gone.
+        """
+        email = normalize_email(email)
         with self._connect() as conn:
             cur = conn.execute(
-                "UPDATE conversations SET title = ? WHERE id = ? AND user_id = ?",
-                (title, int(conversation_id), int(user_id)),
+                "DELETE FROM conversation_members WHERE conversation_id = ? AND email = ?",
+                (int(conversation_id), email),
             )
-            return cur.rowcount > 0
-
-    def delete(self, user_id: int, conversation_id: int) -> bool:
-        with self._connect() as conn:
-            cur = conn.execute(
-                "DELETE FROM conversations WHERE id = ? AND user_id = ?",
-                (int(conversation_id), int(user_id)),
-            )
-            return cur.rowcount > 0
+            if cur.rowcount == 0:
+                return False
+            remaining = conn.execute(
+                "SELECT COUNT(*) AS n FROM conversation_members WHERE conversation_id = ?",
+                (int(conversation_id),),
+            ).fetchone()["n"]
+            if remaining == 0:
+                conn.execute("DELETE FROM conversations WHERE id = ?", (int(conversation_id),))
+            return True
 
     # -- messages -------------------------------------------------------
 
     def list_messages(self, conversation_id: int) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT id, role, content, citations, grounded, created_at "
+                "SELECT id, sender_email, role, content, citations, grounded, created_at "
                 "FROM conversation_messages WHERE conversation_id = ? ORDER BY id",
                 (int(conversation_id),),
             ).fetchall()
@@ -199,16 +267,21 @@ class ConversationStore:
         role: str,
         content: str,
         *,
+        sender_email: str | None = None,
         citations: list[dict[str, Any]] | None = None,
         grounded: bool | None = None,
     ) -> dict[str, Any]:
-        """Append a message and bump the conversation's ``updated_at``.
+        """Append a message and bump the thread's ``updated_at``.
 
-        Raises ``ValueError`` on an unknown role. ``content`` is capped at
-        :data:`MAX_MESSAGE_LEN`; ``citations`` is JSON-encoded.
+        ``sender_email`` is the author for a ``user`` message and ``None`` for
+        an ``assistant`` (gemini) reply. Raises ``ValueError`` on a bad role or
+        a ``user`` message with no sender.
         """
         if role not in _VALID_ROLES:
             raise ValueError(f"role must be one of {sorted(_VALID_ROLES)}, got {role!r}")
+        if role == "user" and not sender_email:
+            raise ValueError("a 'user' message requires a sender_email")
+        sender = normalize_email(sender_email) if sender_email else None
         content = (content or "")[:MAX_MESSAGE_LEN]
         now = time.time()
         cites_json = json.dumps(citations) if citations else None
@@ -216,9 +289,9 @@ class ConversationStore:
         with self._connect() as conn:
             cur = conn.execute(
                 "INSERT INTO conversation_messages "
-                "(conversation_id, role, content, citations, grounded, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (int(conversation_id), role, content, cites_json, grounded_int, now),
+                "(conversation_id, sender_email, role, content, citations, grounded, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (int(conversation_id), sender, role, content, cites_json, grounded_int, now),
             )
             conn.execute(
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
@@ -227,6 +300,7 @@ class ConversationStore:
             mid = int(cur.lastrowid)  # type: ignore[arg-type]
         return {
             "id": mid,
+            "sender_email": sender,
             "role": role,
             "content": content,
             "citations": citations or [],
@@ -234,26 +308,33 @@ class ConversationStore:
             "created_at": now,
         }
 
-    def autotitle_if_default(self, conversation_id: int, text: str) -> None:
-        """Set the title from ``text`` only while it is still the default.
+    # -- helpers --------------------------------------------------------
 
-        Lets a fresh thread name itself from its first real message without
-        ever clobbering a title the user set deliberately.
-        """
-        candidate = " ".join((text or "").split())[:MAX_TITLE_LEN].strip()
-        if not candidate:
-            return
-        with self._connect() as conn:
-            conn.execute(
-                "UPDATE conversations SET title = ? "
-                "WHERE id = ? AND title = ?",
-                (candidate, int(conversation_id), _DEFAULT_TITLE),
-            )
+    @staticmethod
+    def _conversation_dict(conn: sqlite3.Connection, cid: int, viewer: str) -> dict[str, Any]:
+        row = conn.execute(
+            "SELECT id, created_at, updated_at FROM conversations WHERE id = ?", (cid,)
+        ).fetchone()
+        members = [
+            r["email"] for r in conn.execute(
+                "SELECT email FROM conversation_members WHERE conversation_id = ? ORDER BY email",
+                (cid,),
+            ).fetchall()
+        ]
+        peers = [m for m in members if m != normalize_email(viewer)]
+        return {
+            "id": int(row["id"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "members": members,
+            "peer_email": peers[0] if peers else "",
+        }
 
     @staticmethod
     def _message_row(r: sqlite3.Row) -> dict[str, Any]:
         return {
             "id": int(r["id"]),
+            "sender_email": r["sender_email"],
             "role": r["role"],
             "content": r["content"],
             "citations": json.loads(r["citations"]) if r["citations"] else [],
@@ -263,7 +344,7 @@ class ConversationStore:
 
 
 __all__ = [
+    "ConversationError",
     "ConversationStore",
     "MAX_MESSAGE_LEN",
-    "MAX_TITLE_LEN",
 ]
