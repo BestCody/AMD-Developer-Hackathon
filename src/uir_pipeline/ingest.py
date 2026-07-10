@@ -16,6 +16,7 @@ pypdf 6.x auto-parses PDF dates (``D:YYYYMMDDhhmmssZ``) into
 from __future__ import annotations
 
 import hashlib
+import mimetypes
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -246,9 +247,14 @@ def ingest(path: str | Path) -> DocumentInput:
         )
 
 
-#: MIME types for the formats the DOCLING / PPTX_NATIVE routes accept. Used
-#: only to populate ``Source.mime_type`` -- dispatch is by magic bytes, in
+#: MIME types for the formats the non-PDF routes accept. Used only to populate
+#: ``Source.mime_type`` -- dispatch is by magic bytes, in
 #: ``format_router.detect_format``, never by extension alone.
+#:
+#: Pinned rather than left to ``mimetypes.guess_type``, which on Windows reads
+#: the registry: there ``.csv`` answers ``application/vnd.ms-excel`` and
+#: ``.rtf`` answers ``application/msword``. The same document would then carry
+#: a different ``Source.mime_type`` depending on the machine that converted it.
 _MIME_BY_FORMAT: Final[dict[str, str]] = {
     "PDF": PDF_MIME_TYPE,
     "DOCX": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -258,6 +264,13 @@ _MIME_BY_FORMAT: Final[dict[str, str]] = {
     "HTML": "text/html",
     "TEX": "application/x-tex",
     "IPYNB": "application/x-ipynb+json",
+    # Pageless / text route.
+    "TXT": "text/plain",
+    "MD": "text/markdown",
+    "MARKDOWN": "text/markdown",
+    "CSV": "text/csv",
+    "TSV": "text/tab-separated-values",
+    "RTF": "application/rtf",
 }
 
 
@@ -296,10 +309,14 @@ def ingest_any(path: str | Path) -> DocumentInput:
         )
 
     stat = p.stat()
+    # Fall back to the stdlib's extension table before giving up: it knows
+    # text/plain, text/markdown, text/csv and the code extensions, which the
+    # explicit map above deliberately does not enumerate.
+    mime = _MIME_BY_FORMAT.get(fmt.upper()) or mimetypes.guess_type(p.name)[0]
     return DocumentInput(
         source_path=p,
         uri=p.resolve().as_uri(),
-        mime_type=_MIME_BY_FORMAT.get(fmt.upper(), "application/octet-stream"),
+        mime_type=mime or "application/octet-stream",
         size_bytes=stat.st_size,
         sha256=compute_sha256(p),
         timestamp=datetime.now(timezone.utc),

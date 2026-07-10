@@ -28,6 +28,7 @@ import logging
 import os
 import re
 import time
+import dataclasses
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -160,6 +161,65 @@ def _page_texts_from_regions(regions: list[Any]) -> list[tuple[int, str]]:
     for r in regions:
         by_page.setdefault(int(r.page), []).append(r.text)
     return [(page, "\n".join(texts)) for page, texts in sorted(by_page.items())]
+
+
+def _read_text_file(path: Path) -> str:
+    """Read a text file without ever raising on encoding.
+
+    A stray 0x80 byte in a source file must not fail the whole document, so
+    undecodable bytes become U+FFFD rather than a UnicodeDecodeError. UTF-8
+    first because everything modern is; latin-1 never fails but silently
+    mojibakes, so it is not a fallback worth having.
+    """
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _run_text_route(path: Path, fmt: str) -> tuple[list[Any], list[tuple[int, str]]]:
+    """The pageless route: read -> paginate -> regions. No Docling.
+
+    ``format_router`` sends TXT / MD / CSV / RTF / source code here. Docling
+    cannot open most of them -- `.rtf` and `.py` fail its allow-list outright
+    ("File format not allowed") -- and they have no page geometry to recover,
+    so a layout model has nothing to contribute.
+
+    Pages are synthesized by :func:`chunk.paginate_pageless` at ~2000 BGE
+    tokens each, matching the PDF contract of 1-based page numbers. Within a
+    page, blank-line-separated paragraphs become regions so the chunker sees
+    real paragraph boundaries instead of one undifferentiated blob.
+
+    Bounding boxes are the full canvas: a text file has no geometry, and
+    claiming a narrower box would be inventing provenance.
+    """
+    from uir_pipeline.chunk import paginate_pageless
+    from uir_pipeline.layout import LayoutLabel, LayoutRegion
+
+    if fmt.upper() == "RTF":
+        # striprtf decodes the control words; it also paginates for us.
+        from uir_pipeline.ingest_rtf import ingest_rtf
+
+        _doc, page_pairs = ingest_rtf(path)
+    else:
+        page_pairs = paginate_pageless(_read_text_file(path))
+
+    regions: list[Any] = []
+    order = 0
+    for page_no, page_text in page_pairs:
+        for para in re.split(r"\n\s*\n", page_text):
+            para = para.strip()
+            if not para:
+                continue
+            order += 1
+            regions.append(LayoutRegion(
+                label=LayoutLabel.PARAGRAPH,
+                text=para,
+                # Read verbatim off disk; nothing was inferred, so nothing is
+                # uncertain.
+                confidence=1.0,
+                bbox=(0, 0, 1000, 1000),
+                page=int(page_no),
+                reading_order=order,
+            ))
+    return regions, list(page_pairs)
 
 
 def _extract_pptx_route(path: Path) -> list[Any]:
@@ -443,6 +503,10 @@ def run(
             # python-pptx deck has no rendering, so it returns 0 regions.
             all_regions = _extract_pptx_route(p)
             page_text_pairs = _page_texts_from_regions(all_regions)
+        elif froute is FormatRoute.TEXT:
+            # Pageless: docling's allow-list rejects .rtf and source code
+            # outright, and plain text has no layout to recover.
+            all_regions, page_text_pairs = _run_text_route(p, doc.format)
         else:
             # PDF and the DOCLING route (DOCX / XLSX / EPUB / HTML / ...):
             # DocumentConverter accepts all of them natively.
@@ -461,9 +525,28 @@ def run(
             ]
             table_drafts = [_docling_to_table_draft(t) for t in dr.tables]
             page_text_pairs = list(dr.page_texts)
+
+        # Record the lane that actually ran. `ingest_any` copied the router's
+        # classification, which is a *request*, not a result -- a .txt was
+        # landing in the UIR as `route="text"` while docling did the work.
+        # `page_count` is 0 out of `ingest_any` (OOXML has none until laid
+        # out); the pageless routes synthesize pages, so report those.
+        _actual_route = (
+            "pdf" if froute is FormatRoute.PDF
+            else "pptx" if froute is FormatRoute.PPTX_NATIVE
+            else "text" if froute is FormatRoute.TEXT
+            else "docling"
+        )
+        if doc.route != _actual_route or (doc.page_count == 0 and page_text_pairs):
+            doc = dataclasses.replace(
+                doc,
+                route=_actual_route,
+                page_count=doc.page_count or len(page_text_pairs),
+            )
+
         _progress(
             "layout", 45,
-            fast_path="docling" if docling_result is not None else "pptx",
+            fast_path=_actual_route,
             region_count=len(all_regions),
             table_count=len(table_drafts),
         )

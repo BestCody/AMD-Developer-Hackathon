@@ -200,3 +200,125 @@ def test_a_bare_zip_is_not_mistaken_for_ooxml(tmp_path):
         z.writestr("hello.txt", "not an office document")
     with pytest.raises(ValueError, match="unsupported format"):
         ingest_any(path)
+
+
+# ---------------------------------------------------------------------------
+# The pageless TEXT route
+# ---------------------------------------------------------------------------
+# format_router sends TXT / MD / CSV / RTF / source code to a "read -> paginate
+# -> chunk" lane that never invokes Docling. It was declared (paginate_pageless
+# names `pipeline._run_text_route` as a caller) but never written, so these
+# files reached `extract_with_docling`, whose allow-list rejects .rtf and .py
+# outright: "File format not allowed".
+
+def test_text_route_reads_a_plain_text_file(tmp_path):
+    from uir_pipeline.pipeline import _run_text_route
+
+    p = tmp_path / "notes.txt"
+    p.write_text("First paragraph.\n\nSecond paragraph.\n", encoding="utf-8")
+    regions, pages = _run_text_route(p, "TXT")
+    assert [r.text for r in regions] == ["First paragraph.", "Second paragraph."]
+    assert pages and pages[0][0] == 1
+
+
+def test_text_route_handles_source_code(tmp_path):
+    """Docling's allow-list rejects .py; the text route must not."""
+    from uir_pipeline.pipeline import _run_text_route
+
+    p = tmp_path / "mod.py"
+    p.write_text('def f():\n    return 1\n', encoding="utf-8")
+    regions, _ = _run_text_route(p, "PY")
+    assert regions and "def f()" in regions[0].text
+
+
+def test_text_route_survives_undecodable_bytes(tmp_path):
+    """A stray 0x80 must not fail the document."""
+    from uir_pipeline.pipeline import _run_text_route
+
+    p = tmp_path / "weird.txt"
+    p.write_bytes(b"before \x80\xff after")
+    regions, _ = _run_text_route(p, "TXT")
+    assert regions
+    assert "before" in regions[0].text and "after" in regions[0].text
+
+
+def test_text_route_emits_validator_safe_bboxes(tmp_path):
+    from uir_pipeline.pipeline import _run_text_route
+
+    p = tmp_path / "n.txt"
+    p.write_text("one\n\ntwo\n", encoding="utf-8")
+    for r in _run_text_route(p, "TXT")[0]:
+        x1, y1, x2, y2 = r.bbox
+        assert 0 <= x1 <= x2 <= 1000 and 0 <= y1 <= y2 <= 1000
+
+
+def test_text_route_reading_order_is_unique_and_monotonic(tmp_path):
+    from uir_pipeline.pipeline import _run_text_route
+
+    p = tmp_path / "n.txt"
+    p.write_text("a\n\nb\n\nc\n", encoding="utf-8")
+    orders = [r.reading_order for r in _run_text_route(p, "TXT")[0]]
+    assert orders == sorted(orders) == [1, 2, 3]
+
+
+def test_text_route_skips_blank_paragraphs(tmp_path):
+    from uir_pipeline.pipeline import _run_text_route
+
+    p = tmp_path / "n.txt"
+    p.write_text("a\n\n\n\n   \n\nb\n", encoding="utf-8")
+    assert [r.text for r in _run_text_route(p, "TXT")[0]] == ["a", "b"]
+
+
+def test_text_route_decodes_rtf(tmp_path):
+    pytest.importorskip("striprtf")
+    from uir_pipeline.pipeline import _run_text_route
+
+    p = tmp_path / "n.rtf"
+    p.write_bytes(rb"{\rtf1\ansi Hello RTF world.}")
+    regions, _ = _run_text_route(p, "RTF")
+    assert regions
+    text = " ".join(r.text for r in regions)
+    assert "Hello RTF world" in text
+    assert "\rtf1" not in text, "control words must be stripped"
+
+
+# ---------------------------------------------------------------------------
+# Provenance: Source.route must name the lane that actually ran
+# ---------------------------------------------------------------------------
+
+def test_mime_types_do_not_depend_on_the_host_registry(monkeypatch):
+    """On Windows, mimetypes reads the registry: .csv -> application/vnd.ms-excel.
+
+    The same file must not carry a different Source.mime_type depending on
+    which machine converted it.
+    """
+    import mimetypes
+
+    from uir_pipeline.ingest import _MIME_BY_FORMAT
+
+    # Poison the stdlib table the way a Windows registry does.
+    monkeypatch.setattr(
+        mimetypes, "guess_type", lambda *_a, **_k: ("application/vnd.ms-excel", None)
+    )
+    assert _MIME_BY_FORMAT["CSV"] == "text/csv"
+    assert _MIME_BY_FORMAT["RTF"] == "application/rtf"
+    assert _MIME_BY_FORMAT["TXT"] == "text/plain"
+
+
+def test_ingest_any_gives_a_text_file_a_text_mime(tmp_path):
+    p = tmp_path / "n.txt"
+    p.write_text("hello", encoding="utf-8")
+    assert ingest_any(p).mime_type == "text/plain"
+
+
+def test_ingest_any_gives_csv_a_stable_mime(tmp_path):
+    p = tmp_path / "n.csv"
+    p.write_text("a,b\n1,2\n", encoding="utf-8")
+    assert ingest_any(p).mime_type == "text/csv"
+
+
+def test_unknown_text_extension_still_gets_a_mime(tmp_path):
+    """Code extensions fall through to the stdlib table; any answer beats none."""
+    p = tmp_path / "mod.py"
+    p.write_text("x = 1\n", encoding="utf-8")
+    assert ingest_any(p).mime_type
