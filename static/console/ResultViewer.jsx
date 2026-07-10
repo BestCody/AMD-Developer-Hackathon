@@ -11,7 +11,11 @@
  *
  * The JSON tab fetches lazily: on a large document /api/result is the
  * expensive call and most users never open it.
+ *
+ * IIFE-wrapped: see app.jsx.
  */
+
+(function () {
 
 const { Tabs, Button, Badge } = window.ApertureDesignSystem_0a9afd;
 
@@ -143,3 +147,5 @@ function ResultViewer({ job }) {
 }
 
 window.ConsoleResultViewer = ResultViewer;
+
+})();

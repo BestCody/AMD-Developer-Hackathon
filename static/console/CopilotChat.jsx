@@ -13,7 +13,12 @@
  *
  * Honesty note: grounding is enforced by prompt. The citations show what the
  * model was *given*, not proof of what it used.
+ *
+ * IIFE-wrapped: see app.jsx. This file's `const { Badge }` collided with the
+ * identical destructure in ResultViewer.jsx across the shared global scope.
  */
+
+(function () {
 
 const { Badge } = window.ApertureDesignSystem_0a9afd;
 
@@ -185,3 +190,5 @@ function CopilotChat({ files }) {
 }
 
 window.ConsoleCopilotChat = CopilotChat;
+
+})();

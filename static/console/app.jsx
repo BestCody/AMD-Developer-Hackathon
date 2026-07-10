@@ -4,7 +4,16 @@
  * `setTimeout(2200 + i*400)` that flipped files to "done") is now derived from
  * the backend: a job id from POST /api/run, and real stage/percent from
  * polling GET /api/status until the job settles.
+ *
+ * Wrapped in an IIFE. Every `type="text/babel"` script shares one global
+ * lexical scope, so a top-level `const IconRail` here collided with
+ * IconRail.jsx's `function IconRail` -- a SyntaxError that aborted this
+ * whole file, so nothing ever mounted and the page rendered blank. Each
+ * console file keeps its locals to itself and communicates only through
+ * the `window.Console*` globals it explicitly publishes.
  */
+
+(function () {
 
 const IconRail = window.ConsoleIconRail;
 const UploadStage = window.ConsoleUploadStage;
@@ -149,3 +158,5 @@ function App() {
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+
+})();

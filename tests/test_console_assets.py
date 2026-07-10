@@ -105,6 +105,75 @@ def test_design_system_global_matches_the_bundle():
             )
 
 
+_DECL = re.compile(r"\b(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)")
+_DESTRUCTURE = re.compile(r"\b(?:const|let|var)\s*\{([^}]*)\}\s*=")
+
+
+def _global_scope_names(src: str) -> set[str]:
+    """Names a file introduces into the *shared global* lexical scope.
+
+    Scope, not indentation: a declaration is global only at brace depth 0.
+    Anything inside the file's IIFE is private no matter what column it sits
+    in, so this must track depth rather than match `^const`.
+    """
+    code = _strip_comments_and_strings(src)
+    names: set[str] = set()
+    depth = 0
+    for line in code.splitlines():
+        if depth == 0:
+            names.update(_DECL.findall(line))
+            for group in _DESTRUCTURE.findall(line):
+                for part in group.split(","):
+                    # `{ Tabs, Button, Badge }` and `{ a: b }` -> bound name.
+                    bound = part.split(":")[-1].strip()
+                    if re.fullmatch(r"[A-Za-z_$][\w$]*", bound):
+                        names.add(bound)
+        depth += line.count("{") - line.count("}")
+    return names
+
+
+def test_no_two_jsx_files_declare_the_same_top_level_name():
+    """Every `type="text/babel"` script shares ONE global lexical scope.
+
+    Two files declaring the same top-level `const`/`function` is a
+    SyntaxError ("Identifier 'X' has already been declared") that aborts the
+    *entire* later file. When that file is app.jsx, `ReactDOM.createRoot`
+    never runs and the page is blank -- which is precisely what shipped:
+    app.jsx's `const IconRail` collided with IconRail.jsx's
+    `function IconRail`, and CopilotChat.jsx's `const { Badge }` collided
+    with ResultViewer.jsx's.
+
+    The fix is that each file wraps itself in an IIFE, so this test asserts
+    the collision is impossible rather than merely absent today.
+    """
+    owners: dict[str, list[str]] = {}
+    for jsx in _JSX_FILES:
+        for name in _global_scope_names(_read(jsx)):
+            owners.setdefault(name, []).append(jsx.name)
+
+    clashes = {n: sorted(f) for n, f in owners.items() if len(f) > 1}
+    assert not clashes, (
+        "these names are declared at top level in more than one JSX file; "
+        f"the browser aborts the later file with a SyntaxError: {clashes}"
+    )
+
+
+@pytest.mark.parametrize("jsx", _JSX_FILES, ids=lambda p: p.name)
+def test_each_jsx_file_keeps_its_locals_out_of_the_global_scope(jsx: Path):
+    """Each console file must wrap its body in an IIFE.
+
+    Without it, the file's top-level names leak into the scope every other
+    `text/babel` script shares, and the next file that picks the same name
+    silently kills the page. Publishing happens through `window.Console*`.
+    """
+    code = _strip_comments_and_strings(_read(jsx))
+    assert re.search(r"^\(function\s*\(\s*\)\s*\{", code, re.M), (
+        f"{jsx.name} does not open with an IIFE; its top-level declarations "
+        "leak into the shared global scope"
+    )
+    assert re.search(r"^\}\)\(\);", code, re.M), f"{jsx.name} does not close its IIFE"
+
+
 def _strip_comments_and_strings(src: str) -> str:
     src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
     src = re.sub(r"//[^\n]*", "", src)

@@ -11,7 +11,11 @@
  *      needs to deliver a single-use token out of band (email), and this
  *      project has no mail transport. A link that goes nowhere is worse than
  *      no link. See auth.py's module docstring.
+ *
+ * IIFE-wrapped: see app.jsx.
  */
+
+(function () {
 
 const AUTH_CARD = {
   width: 520,
@@ -240,3 +244,5 @@ function SignUpScreen({ onAuthed, onBack }) {
 
 window.ConsoleLoginScreen = LoginScreen;
 window.ConsoleSignUpScreen = SignUpScreen;
+
+})();

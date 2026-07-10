@@ -4,7 +4,11 @@
  * hardcoded list of fictional conversations ("Priya Shah", "Marcus Lee").
  * There is no messaging backend, so that panel is not shipped. The rail's
  * bottom slot shows who you actually are and lets you sign out.
+ *
+ * IIFE-wrapped: see app.jsx.
  */
+
+(function () {
 
 function IconRail({ active, onChange, user, onLogout }) {
   const items = [
@@ -99,3 +103,5 @@ function IconRail({ active, onChange, user, onLogout }) {
 }
 
 window.ConsoleIconRail = IconRail;
+
+})();

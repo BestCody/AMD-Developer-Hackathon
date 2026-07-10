@@ -9,7 +9,11 @@
  * Now: the real File goes to POST /api/run, and the converging-rings
  * animation reports the pipeline's actual stage and percentage from
  * /api/status. The success badge pops when the job really finishes.
+ *
+ * IIFE-wrapped: see app.jsx.
  */
+
+(function () {
 
 const UPLOAD_STAGE_LABELS = {
   queued: "Queued",
@@ -279,3 +283,5 @@ function UploadStage({ files, selectedId, onSelectFile, onAddFiles, onDeleteFile
 }
 
 window.ConsoleUploadStage = UploadStage;
+
+})();
