@@ -175,3 +175,58 @@ def test_enrich_chunks_topics_stub_returns_empty(stub_spacy):
     """Topics are out of MVP scope per PLAN.md \u00a73 -- always []."""
     res = enrich_chunks(["x" ])
     assert res.topics == []
+
+
+# ----------------------------------------------------------------------------
+# Defensive fallback when the spaCy model isn't installed
+# ----------------------------------------------------------------------------
+
+def test_enrich_missing_model_fail_soft(monkeypatch):
+    """When spaCy's ``en_core_web_sm`` isn't installed (``python -m spacy
+    download`` was skipped), :func:`enrich_chunks` returns an empty result
+    instead of crashing the pipeline. Tests the ``OSError [E050]`` defensive
+    path in :func:`uir_pipeline.enrich._get_nlp`.
+
+    The test drives ``_get_nlp`` through the load branch by popping the
+    cache entry the shared ``stub_spacy`` fixture would normally pre-fill,
+    then stubs ``spacy.load`` to raise the exact ``OSError`` spaCy emits
+    when a model isn't installed. The fallback sentinel (see
+    :class:`uir_pipeline.enrich._DummyNLP`) is cached so subsequent jobs
+    don't re-warn or re-raise.
+    """
+    import sys
+    import types
+    import importlib.machinery
+
+    from uir_pipeline import enrich as enrich_mod
+
+    # ``stub_spacy`` is intentionally NOT used: it pre-populates the cache
+    # and would short-circuit the load branch we want to exercise.
+    enrich_mod._NLP_CACHE.pop(DEFAULT_SPACY_MODEL, None)
+
+    def _load_raises(name: str) -> None:
+        raise OSError(f"[E050] Can't find model '{name!r}'.")
+
+    spacy_stub = types.ModuleType("spacy")
+    spacy_stub.__spec__ = importlib.machinery.ModuleSpec("spacy", loader=None)
+    spacy_stub.load = _load_raises
+    monkeypatch.setitem(sys.modules, "spacy", spacy_stub)
+
+    try:
+        res = enrich_chunks(["Some chunk text.", ""])
+
+        # No entities / relationships / topics when the model is missing.
+        assert res.entities == []
+        assert res.relationships == []
+        assert res.topics == []
+        # The sentinel is cached so subsequent calls don't re-warn or re-raise.
+        assert isinstance(
+            enrich_mod._NLP_CACHE[DEFAULT_SPACY_MODEL],
+            enrich_mod._DummyNLP,
+        )
+    finally:
+        # Cleanup so the next test in this file sees a fresh cache (matches
+        # what the ``stub_spacy`` fixture's teardown does). The finally
+        # block keeps the cache clean even if an assertion failure
+        # mid-test would otherwise leak ``_DummyNLP`` to subsequent tests.
+        enrich_mod._NLP_CACHE.pop(DEFAULT_SPACY_MODEL, None)

@@ -281,11 +281,16 @@ class _WarmWorker:
             code = self._proc.exitcode
         # The queues may hold half-written messages from the dead child; a
         # fresh worker gets fresh queues rather than inheriting that debris.
+        # `close()` alone leaves the background feeder thread holding the
+        # pipe write-end open; `join_thread()` is what actually releases it.
+        # Without the join, every crash/respawn cycle leaked ~2 FDs per queue
+        # until the parent itself hit EMFILE under multi-upload.
         for q in (self._job_q, self._progress_q, self._result_q):
             try:
                 if q is not None:
                     q.close()
-            except Exception:  # noqa: BLE001
+                    q.join_thread(timeout=2.0)
+            except Exception:  # noqa: BLE001 -- best-effort cleanup
                 pass
         self._proc = self._job_q = self._progress_q = self._result_q = None
         return code
@@ -430,6 +435,12 @@ class Job:
     # whichever of these two the user-facing view should display.
     umr_path: Path | None = None
     intent_umr_path: Path | None = None
+    #: Folder membership for the file-browser's left tree. ``None`` means the
+    #: document lives at the "All files" root. Set at upload time from the
+    #: optional ``folder`` form field and mutated by ``PATCH /api/jobs/<id>``.
+    #: Persisted alongside the rest of the job (see :mod:`uir_pipeline.library`)
+    #: so the library survives a restart.
+    folder_id: int | None = None
 
     def to_public(self) -> dict[str, Any]:
         """Shape we return to the front-end (excludes raw filesystem paths).
@@ -481,6 +492,7 @@ class Job:
             "intent": public_intent,
             "result": self.result,
             "error": self.error,
+            "folder_id": self.folder_id,
         }
 
 
@@ -512,6 +524,23 @@ def create_app(
 
     Overridable via ``UIR_WEB_EXECUTION``.
     """
+    # Raise the file-descriptor soft limit to the hard limit. The pipeline
+    # child loads torch + Docling + BGE + PyMuPDF -- hundreds of FDs -- and
+    # macOS's default soft cap (256) is low enough that a real conversion
+    # exhausts it, crashing the child; the crash/respawn cycle then leaks
+    # pipe FDs in this parent until werkzeug itself EMFILEs (500s on static
+    # + JSX -> Babel can't load -> whitescreen, and polls fail). A `spawn`
+    # child inherits these limits, so raising once here covers both. No-op
+    # where the soft limit is already at the hard cap or `resource` is absent
+    # (Windows). See error.tmp for the original EMFILE traceback.
+    try:
+        import resource as _resource
+        _soft, _hard = _resource.getrlimit(_resource.RLIMIT_NOFILE)
+        if _soft < _hard and _hard != _resource.RLIM_INFINITY:
+            _resource.setrlimit(_resource.RLIMIT_NOFILE, (_hard, _hard))
+    except (ImportError, ValueError, OSError):  # pragma: no cover -- non-Unix / denied
+        pass
+
     from uir_pipeline.auth import UserStore, resolve_secret_key
     from uir_pipeline.conversations import ConversationStore
 
@@ -575,6 +604,13 @@ def create_app(
     # Chats-panel threads live in the same SQLite file, one table set each.
     conversations = ConversationStore(data_dir / "monadlabs.db")
     app.config["CONVERSATION_STORE"] = conversations
+    # Folders + durable job records for the file-browser library. The jobs
+    # table mirrors the persistent fields of the ``Job`` dataclass so the
+    # in-memory registry can be rehydrated after a restart (see
+    # :func:`_rehydrate_jobs`). Write-through keeps the two in sync.
+    from uir_pipeline.library import LibraryStore
+    library = LibraryStore(data_dir / "monadlabs.db")
+    app.config["LIBRARY_STORE"] = library
 
     # Per-app job registry -- thread-safe by virtue of the GIL guarding dict
     # assignment + the lock below for read-modify-write on the Job itself.
@@ -642,10 +678,22 @@ def create_app(
             abort(403, description="cross-origin request rejected")
         return None
 
+    def _persist(job: Job) -> None:
+        """Write-through mirror of the in-memory Job into SQLite.
+
+        Best-effort: the in-memory dict is the hot read path, so a DB hiccup
+        must never kill the runner. The exception is logged and swallowed.
+        """
+        try:
+            library.upsert_job(job)
+        except Exception as exc:  # noqa: BLE001 -- persistence is best-effort
+            logger.warning("job persist failed for %s: %s", job.job_id, exc)
+
     def _runner(job: Job) -> None:
         """Background thread body -- runs the pipeline and updates the Job."""
         try:
             _advance(job, JOB_RUNNING, "ingest", 5, lock=jobs_lock)
+            _persist(job)
 
             def _on_progress(stage: str, pct: int, **meta: Any) -> None:
                 """Forward orchestrator progress + optional stage meta to the Job.
@@ -661,6 +709,7 @@ def create_app(
                 if meta:
                     with jobs_lock:
                         job.stage_meta = dict(meta)
+                _persist(job)
 
             if job.upload_path is None:  # pragma: no cover -- set before dispatch
                 raise RuntimeError(f"job {job.job_id} has no upload path")
@@ -823,6 +872,7 @@ def create_app(
                         )
                 job.status = JOB_DONE
                 job.finished_at = time.time()
+            _persist(job)
         except Exception as exc:  # noqa: BLE001 -- top-level worker guard
             logger.exception("web job %s failed", job.job_id)
             with jobs_lock:
@@ -834,6 +884,7 @@ def create_app(
                     else f"{type(exc).__name__}: {exc}"
                 )
                 job.finished_at = time.time()
+            _persist(job)
 
     # -------- routes ----------------------------------------------------
 
@@ -901,16 +952,178 @@ def create_app(
             return jsonify({"error": "not authenticated"}), 401
         return jsonify({"user": user})
 
+    @app.get("/api/users/search")
+    @login_required
+    def api_users_search() -> ResponseReturnValue:
+        """Autocomplete: registered users whose email starts with ``q``."""
+        q = (request.args.get("q") or "").strip().lower()
+        if len(q) < 2:
+            return jsonify({"users": []})
+        return jsonify({"users": users.search_by_email(q, limit=10)})
+
     # -------- jobs ------------------------------------------------------
 
     @app.get("/api/jobs")
     @login_required
     def api_jobs() -> ResponseReturnValue:
         uid = request.user["id"]  # type: ignore[attr-defined]
+        # Optional ``?folder_id=`` narrows to one folder. The literal ``""``
+        # means "root only" (folder_id IS NULL); absent means "all of the
+        # caller's jobs regardless of folder". The file-browser's left tree
+        # uses this to populate the currently-selected folder's grid.
+        folder_param = request.args.get("folder_id")
         with jobs_lock:
-            mine = [j.to_public() for j in jobs.values() if j.user_id == uid]
+            mine_jobs = [j for j in jobs.values() if j.user_id == uid]
+            if folder_param is not None:
+                fid = int(folder_param) if folder_param != "" else None
+                mine_jobs = [j for j in mine_jobs if j.folder_id == fid]
+            mine = [j.to_public() for j in mine_jobs]
         mine.sort(key=lambda j: j["submitted_at"])
         return jsonify({"jobs": mine})
+
+    # -------- folders / library ----------------------------------------
+
+    @app.get("/api/folders")
+    @login_required
+    def api_folders_list() -> ResponseReturnValue:
+        uid = request.user["id"]  # type: ignore[attr-defined]
+        return jsonify({"folders": library.list_folders(uid)})
+
+    @app.post("/api/folders")
+    @login_required
+    def api_folders_create() -> ResponseReturnValue:
+        uid = request.user["id"]  # type: ignore[attr-defined]
+        body = _json_body()
+        name = (body.get("name") or "").strip()
+        if not name:
+            abort(400, description="folder name is required")
+        try:
+            folder = library.create_folder(uid, name)
+        except ValueError as exc:
+            abort(400, description=str(exc))
+        return jsonify({"folder": folder}), 201
+
+    @app.patch("/api/folders/<int:folder_id>")
+    @login_required
+    def api_folders_rename(folder_id: int) -> ResponseReturnValue:
+        uid = request.user["id"]  # type: ignore[attr-defined]
+        body = _json_body()
+        name = (body.get("name") or "").strip()
+        if not name:
+            abort(400, description="folder name is required")
+        try:
+            ok = library.rename_folder(folder_id, uid, name)
+        except ValueError as exc:
+            abort(400, description=str(exc))
+        if not ok:
+            abort(404, description="folder not found")
+        return jsonify({"ok": True})
+
+    @app.delete("/api/folders/<int:folder_id>")
+    @login_required
+    def api_folders_delete(folder_id: int) -> ResponseReturnValue:
+        uid = request.user["id"]  # type: ignore[attr-defined]
+        if not library.delete_folder(folder_id, uid):
+            abort(404, description="folder not found")
+        # ``ON DELETE SET NULL`` already moved the folder's jobs to the root
+        # in SQLite; mirror that in the in-memory registry so the next
+        # ``/api/jobs`` reflects it without a restart.
+        with jobs_lock:
+            for j in jobs.values():
+                if j.user_id == uid and j.folder_id == folder_id:
+                    j.folder_id = None
+        return jsonify({"ok": True})
+
+    @app.patch("/api/jobs/<job_id>")
+    @login_required
+    def api_jobs_update(job_id: str) -> ResponseReturnValue:
+        """Move a job into a folder (``folder_id``) or to the root (``null``)."""
+        uid = request.user["id"]  # type: ignore[attr-defined]
+        body = _json_body()
+        raw = body.get("folder_id")
+        # Accept null/missing -> root; otherwise coerce to int.
+        folder_id: int | None
+        if raw is None:
+            folder_id = None
+        else:
+            try:
+                folder_id = int(raw)
+            except (TypeError, ValueError):
+                abort(400, description="folder_id must be an integer or null")
+        if not library.set_folder(job_id, uid, folder_id):
+            # Either the job isn't the caller's, or the target folder isn't.
+            # 404 (not 403) to avoid leaking which id is real.
+            abort(404, description="job or folder not found")
+        with jobs_lock:
+            job = jobs.get(job_id)
+            if job is not None and job.user_id == uid:
+                job.folder_id = folder_id
+        return jsonify({"ok": True})
+
+    @app.delete("/api/jobs/<job_id>")
+    @login_required
+    def api_jobs_delete(job_id: str) -> ResponseReturnValue:
+        """Permanently delete a job: on-disk artefacts + DB row + memory entry."""
+        uid = request.user["id"]  # type: ignore[attr-defined]
+        with jobs_lock:
+            job = _owned_job(job_id)  # 404 if missing or not owner
+            # Remove every artefact the pipeline wrote for this job.
+            for attr in ("upload_path", "uir_path", "umr_path",
+                         "intent_uir_path", "intent_umr_path"):
+                p = getattr(job, attr, None)
+                if p is not None:
+                    try:
+                        Path(p).unlink()
+                    except OSError:
+                        pass
+            library.delete_job(job_id, uid)
+            jobs.pop(job_id, None)
+        return jsonify({"ok": True})
+
+    @app.get("/api/thumb/<job_id>")
+    @login_required
+    def api_thumb(job_id: str) -> ResponseReturnValue:
+        """A non-text preview tile for a finished job's source file.
+
+        Images are served verbatim (the original is the preview). PDFs render
+        page 1 to PNG via PyMuPDF. Everything else 404s so the front-end falls
+        back to a filetype icon. Cached for an hour -- the source file is
+        immutable once the job is done.
+        """
+        with jobs_lock:
+            job = _owned_job(job_id)
+            if job.status != JOB_DONE:
+                abort(409, description="job not done yet")
+            upload_path = job.upload_path
+        if upload_path is None or not Path(upload_path).is_file():
+            abort(404, description="source file not found")
+        ext = Path(upload_path).suffix.lower()
+        _IMG_MIME = {
+            ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+            ".tiff": "image/tiff", ".tif": "image/tiff",
+        }
+        if ext in _IMG_MIME:
+            return send_file(upload_path, mimetype=_IMG_MIME[ext])
+        if ext == ".pdf":
+            try:
+                import fitz  # PyMuPDF -- already a dependency (see caption.py)
+            except ImportError:
+                abort(404, description="thumbnail renderer unavailable")
+            try:
+                doc = fitz.open(str(upload_path))
+                if doc.page_count < 1:
+                    doc.close()
+                    abort(404, description="empty pdf")
+                pix = doc[0].get_pixmap(dpi=144)
+                img = pix.tobytes("png")
+                doc.close()
+            except Exception as exc:  # noqa: BLE001 -- render is best-effort
+                logger.warning("thumb render failed for job %s: %s", job_id, exc)
+                abort(404, description="thumbnail render failed")
+            return Response(img, mimetype="image/png",
+                            headers={"Cache-Control": "public, max-age=3600"})
+        abort(404, description="no thumbnail for this file type")
 
     @app.post("/api/run")
     @login_required
@@ -959,6 +1172,10 @@ def create_app(
         # means "send me the full document"; the front-end maps this to
         # an opt-in text input alongside the file picker.
         intent_str = (request.form.get("intent") or "").strip() or None
+        # Optional folder: the file-browser uploads into the currently-open
+        # folder. ``None``/missing lands the document at the "All files" root.
+        folder_raw = (request.form.get("folder") or "").strip() or None
+        folder_id: int | None = int(folder_raw) if folder_raw is not None else None
 
         job = Job(
             job_id=job_id,
@@ -966,9 +1183,13 @@ def create_app(
             filename=safe_name,
             upload_path=saved,
             intent=intent_str,
+            folder_id=folder_id,
         )
         with jobs_lock:
             jobs[job_id] = job
+            # Write-through: persist the queued job so it survives a restart
+            # even if the runner hasn't moved it yet.
+            library.upsert_job(job)
 
         th = threading.Thread(target=_runner, args=(job,), daemon=True, name=f"web-{job_id[:8]}")
         th.start()
@@ -1068,22 +1289,27 @@ def create_app(
         caller owns, filtered to ``job_ids`` when given. Jobs belonging to
         anyone else are excluded before retrieval, so the model never sees a
         passage from a document the caller cannot already read. Shared by
-        ``/api/chat`` and the Chats panel's ``gemini:`` command so the two
+        ``/api/chat`` and the Chats panel's ``@fireworks`` command so the two
         cannot drift.
         """
         from uir_pipeline import chat as _chat
 
         with jobs_lock:
-            paths = [
-                job.uir_path
+            docs = [
+                {
+                    "job_id": job.job_id,
+                    "uir_path": job.uir_path,
+                    "filename": job.filename,
+                }
                 for job in jobs.values()
                 if job.user_id == uid
                 and job.status == JOB_DONE
                 and job.uir_path is not None
                 and (job_ids is None or job.job_id in job_ids)
             ]
+            paths = [Path(d["uir_path"]) for d in docs]
 
-        if not paths:
+        if not docs:
             # Same key set as a successful answer so no caller special-cases it.
             return {
                 "answer": (
@@ -1095,10 +1321,14 @@ def create_app(
                 "invalid_citations": [],
                 "grounded": False,
                 "model": None,
+                "tool_steps": [],
             }, 200
 
         contexts = _chat.retrieve(paths, message)
-        result = _chat.answer(message, contexts, history=history)
+        # ``docs`` puts the agent in tool-calling mode: the model can call
+        # ``search`` / ``get_more_sources`` to fetch more passages from the
+        # caller's own documents. Without ``docs`` it stays single-shot.
+        result = _chat.answer(message, contexts, history=history, docs=docs, job_ids=job_ids)
 
         if not result["success"]:
             # The model call failed (missing key, upstream 5xx). Surface it
@@ -1115,7 +1345,37 @@ def create_app(
             "invalid_citations": result.get("invalid_citations", []),
             "grounded": result.get("grounded", False),
             "model": result.get("model"),
+            "tool_steps": result.get("tool_steps", []),
         }, 200
+
+    @app.post("/api/search")
+    @login_required
+    def api_search() -> ResponseReturnValue:
+        """Semantic + title-priority passage search over the caller's documents.
+
+        Ranks passages by BGE cosine to the query, with a boost for documents
+        whose title matches (title priority). Used by the global search bar;
+        the agent's ``search``/``get_more_sources`` tools call the same
+        :func:`uir_pipeline.search.search` directly.
+        """
+        body = _json_body()
+        q = (body.get("query") or "").strip()
+        if not q:
+            return jsonify({"results": []})
+        uid = request.user["id"]  # type: ignore[attr-defined]
+        job_ids: set[str] | None = None
+        if isinstance(body.get("job_ids"), list):
+            job_ids = {str(j) for j in body["job_ids"]}
+        with jobs_lock:
+            docs = [
+                {"job_id": job.job_id, "uir_path": job.uir_path, "filename": job.filename}
+                for job in jobs.values()
+                if job.user_id == uid and job.status == JOB_DONE and job.uir_path
+                and (job_ids is None or job.job_id in job_ids)
+            ]
+        from uir_pipeline.search import search as _doc_search
+        top_k = int(body.get("top_k") or 8)
+        return jsonify({"results": _doc_search(docs, q, top_k=top_k)})
 
     @app.post("/api/chat")
     @login_required
@@ -1123,7 +1383,8 @@ def create_app(
         """Answer a question grounded in the caller's converted documents.
 
         Retrieval spans every ``done`` job the caller owns, unless the
-        body narrows it with ``job_ids``.
+        body narrows it with ``job_ids``. The agent may call ``search`` /
+        ``get_more_sources`` to gather more passages before answering.
         """
         body = _json_body()
         message = (body.get("message") or "").strip()
@@ -1146,7 +1407,10 @@ def create_app(
     @login_required
     def api_conversations_list() -> ResponseReturnValue:
         email = request.user["email"]  # type: ignore[attr-defined]
-        return jsonify({"conversations": conversations.list_for_email(email)})
+        cs = conversations.list_for_email(email)
+        for c in cs:
+            c["peer_registered"] = bool(users.get_by_email(c["peer_email"]))
+        return jsonify({"conversations": cs})
 
     @app.post("/api/conversations")
     @login_required
@@ -1166,6 +1430,7 @@ def create_app(
             convo, created = conversations.create_with(email, body.get("peer_email") or "")
         except ConversationError as exc:
             return jsonify({"error": str(exc)}), 400
+        convo["peer_registered"] = bool(users.get_by_email(convo.get("peer_email", "")))
         return jsonify({"conversation": convo}), (201 if created else 200)
 
     @app.delete("/api/conversations/<int:cid>")
@@ -1184,6 +1449,7 @@ def create_app(
         convo = conversations.get_for_email(email, cid)
         if convo is None:
             abort(404, description="conversation not found")
+        convo["peer_registered"] = bool(users.get_by_email(convo.get("peer_email", "")))
         return jsonify({
             "conversation": convo,
             "messages": conversations.list_messages(cid),
@@ -1195,7 +1461,7 @@ def create_app(
         """Post a message to a thread the caller is a member of.
 
         A plain message is stored as the caller's message (the other member
-        sees it). A message beginning with the ``gemini:`` trigger is stored
+        sees it). A message beginning with the ``@fireworks`` trigger is stored
         verbatim, then its remainder is answered from the *sender's* own
         documents and the reply is stored as a shared ``assistant`` message
         both members see. The user message is persisted before the model
@@ -1212,9 +1478,9 @@ def create_app(
         if not text:
             return jsonify({"error": "text is required"}), 400
 
-        question = _gemini_question(text)
+        question = _fireworks_question(text)
         if question is not None and not question:
-            return jsonify({"error": "Add a question after 'gemini:'."}), 400
+            return jsonify({"error": "Add a question after '@fireworks'."}), 400
 
         user_msg = conversations.add_message(cid, "user", text, sender_email=email)
 
@@ -1222,7 +1488,7 @@ def create_app(
             # Ordinary message between the two people -- nothing to answer.
             return jsonify({"user_message": user_msg, "reply": None})
 
-        # Model history: this thread's prior gemini exchanges only -- the
+        # Model history: this thread's prior fireworks exchanges only -- the
         # stripped questions and the assistant answers. Ordinary person-to-
         # person messages are not part of the model dialogue.
         history: list[dict[str, Any]] = []
@@ -1232,7 +1498,7 @@ def create_app(
             if m["role"] == "assistant":
                 history.append({"role": "assistant", "content": m["content"]})
             else:
-                q = _gemini_question(m["content"])
+                q = _fireworks_question(m["content"])
                 if q:
                     history.append({"role": "user", "content": q})
 
@@ -1246,6 +1512,7 @@ def create_app(
             cid, "assistant", payload["answer"],
             citations=payload.get("cited") or payload.get("citations") or [],
             grounded=bool(payload.get("grounded")),
+            tool_steps=payload.get("tool_steps") or [],
         )
         return jsonify({"user_message": user_msg, "reply": reply})
 
@@ -1258,6 +1525,34 @@ def create_app(
     @app.errorhandler(429)
     def _handle_http_err(exc: Any) -> ResponseReturnValue:
         return jsonify({"error": exc.description if hasattr(exc, "description") else str(exc)}), exc.code
+
+    # Belt-and-suspenders cache-busting on /static/<...>. The console ships
+    # Babel-in-the-browser and serves its own ``.jsx`` files over GET
+    # ``/static/...``; if a browser caches them, a stale (or now-removed)
+    # file keeps being parsed on every reload and surfaces as a ghostly
+    # Babel SyntaxError long after the source went away.
+    # ``Cache-Control: no-store`` tells the browser to never cache at all
+    # -- the only fully-bulletproof answer for this category of "Babel
+    # parses a file that no longer exists" failure. ``max-age=0`` was
+    # considered but weak: revalidation against a stable ETag can still
+    # return 304 and re-serve the stale body.
+    # Dev-grade behaviour: the design intent (templates/console.html's own
+    # comment) is to drop the whole Babel pass before any LAN demo grows up
+    # into a real deploy, at which point this hook goes away with it.
+    #
+    # Endpoint check rather than path-prefix -- so a future blueprint that
+    # registers its own static folder (which would name its endpoint
+    # ``blueprintname.static``, not ``"static"``) keeps standard caching.
+    @app.after_request
+    def _no_store_on_static(response: Response) -> Response:
+        if request.endpoint == "static":
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+    # Repopulate the in-memory job registry from SQLite so the file-browser
+    # library (folders + documents) survives a server restart. Orphaned
+    # in-flight jobs are marked errored here -- their runner thread is gone.
+    _rehydrate_jobs(app)
 
     return app
 
@@ -1281,22 +1576,49 @@ def _advance(
         job.progress_percent = max(0, min(100, int(percent)))
 
 
+def _rehydrate_jobs(app: Flask) -> None:
+    """Repopulate the in-memory job registry from SQLite after a restart.
+
+    Jobs that were still ``queued``/``running`` when the server died are
+    orphaned: their daemon thread is gone and will never advance them again.
+    Flip them to ``error`` so the UI shows a recoverable state instead of a
+    spinner that never resolves, and persist that flip. ``done``/``error``
+    jobs come back verbatim, so the file-browser library reappears exactly
+    as the user left it. Safe to call on a fresh database (no rows -> no-op).
+    """
+    store = app.config.get("LIBRARY_STORE")
+    jobs = app.config.get("JOBS")
+    if store is None or jobs is None:
+        return
+    for row in store.list_all_job_rows():
+        job = Job(**row)
+        if job.status in (JOB_QUEUED, JOB_RUNNING):
+            job.status = JOB_ERROR
+            job.error = "Server restarted while this job was running."
+            job.finished_at = time.time()
+            try:
+                store.upsert_job(job)
+            except Exception as exc:  # noqa: BLE001 -- best-effort
+                logger.warning("rehydrate persist failed for %s: %s", job.job_id, exc)
+        jobs[job.job_id] = job
+
+
 #: The Chats panel's inline-assistant trigger. A message whose first
-#: non-space characters are ``gemini:`` (any case) is a command: the text
-#: after the colon is answered from the caller's documents. The keyword is
-#: literally "gemini" by product request, even though the backend model is
+#: non-space characters are ``@fireworks`` (any case) is a command: the text
+#: after the trigger is answered from the caller's documents. The keyword is
+#: literally "fireworks" by product request, even though the backend model is
 #: Fireworks -- it is the user-facing invocation word, not a model id.
-_GEMINI_PREFIX = re.compile(r"^\s*gemini:\s*", re.IGNORECASE)
+_FIREWORKS_PREFIX = re.compile(r"^\s*@fireworks\b\s*", re.IGNORECASE)
 
 
-def _gemini_question(text: str) -> str | None:
-    """Return the question after a ``gemini:`` trigger, else ``None``.
+def _fireworks_question(text: str) -> str | None:
+    """Return the question after an ``@fireworks`` trigger, else ``None``.
 
     ``None`` means "not a command, store as a plain note". An empty string
-    means "was a command but nothing followed the colon" -- the caller
+    means "was a command but nothing followed the trigger" -- the caller
     rejects that rather than sending the model an empty prompt.
     """
-    m = _GEMINI_PREFIX.match(text or "")
+    m = _FIREWORKS_PREFIX.match(text or "")
     if not m:
         return None
     return text[m.end():].strip()

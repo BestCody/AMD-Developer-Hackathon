@@ -21,6 +21,33 @@
 (function () {
 
 const { Badge } = window.ApertureDesignSystem_0a9afd;
+const Markdown = window.ConsoleMarkdown;
+
+/** Compact chips showing the agent's tool calls before the answer. */
+function ToolSteps({ steps }) {
+  if (!steps || !steps.length) return null;
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+      {steps.map((s, i) => {
+        const isMore = s.tool === "get_more_sources";
+        const label = isMore
+          ? `Fetched ${s.n_results} more source${s.n_results === 1 ? "" : "s"}`
+          : `Searched “${s.query}” — ${s.n_results} source${s.n_results === 1 ? "" : "s"}`;
+        return (
+          <span key={i} style={{
+            display: "inline-flex", alignItems: "center", gap: 5,
+            background: "var(--gray-100)", color: "var(--text-muted-80)",
+            borderRadius: "var(--radius-pill)", padding: "3px 10px",
+            fontSize: "var(--text-micro-legal-size)", fontWeight: 600,
+          }}>
+            <i data-lucide={isMore ? "plus-circle" : "search"} style={{ width: 12, height: 12 }} />
+            {label}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
 
 function Citations({ items }) {
   const [open, setOpen] = React.useState(false);
@@ -55,7 +82,7 @@ function Citations({ items }) {
   );
 }
 
-function GeminiChat({ files }) {
+function FireworksChat({ files }) {
   const converted = files.filter((f) => f.status === "done");
   const [messages, setMessages] = React.useState([]);
   const [draft, setDraft] = React.useState("");
@@ -86,6 +113,7 @@ function GeminiChat({ files }) {
         content: res.answer,
         citations: res.citations || [],
         grounded: res.grounded,
+        tool_steps: res.tool_steps || [],
       }]);
     } catch (err) {
       if (window.MonadLabsAPI.isUnauthorized(err)) { window.location.reload(); return; }
@@ -103,7 +131,7 @@ function GeminiChat({ files }) {
     <div style={{ display: "flex", flexDirection: "column", height: "100%", maxWidth: 760, margin: "0 auto", width: "100%" }}>
       <div style={{ padding: "32px 8px 12px", display: "flex", alignItems: "center", gap: 12 }}>
         <div style={{ fontFamily: "var(--font-display)", fontSize: "var(--text-display-md-size)", fontWeight: 600, letterSpacing: "var(--text-display-md-tracking)", color: "var(--text-ink)" }}>
-          Gemini
+          Fireworks
         </div>
         <Badge kind={converted.length ? "success" : "neutral"}>
           {converted.length} document{converted.length === 1 ? "" : "s"} indexed
@@ -122,18 +150,19 @@ function GeminiChat({ files }) {
         {messages.map((m, i) => (
           <div key={i} style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start" }}>
             <div style={{ maxWidth: "78%" }}>
+              {m.role === "assistant" && <ToolSteps steps={m.tool_steps} />}
               <div
                 style={{
                   padding: "12px 16px",
                   borderRadius: "var(--radius-lg)",
                   fontSize: "var(--text-body-size)",
                   lineHeight: "var(--text-body-leading)",
-                  whiteSpace: "pre-wrap",
+                  whiteSpace: m.role === "user" ? "pre-wrap" : "normal",
                   background: m.role === "user" ? "var(--accent-primary)" : "var(--gray-100)",
                   color: m.role === "user" ? "var(--on-accent)" : "var(--text-ink)",
                 }}
               >
-                {m.content}
+                {m.role === "assistant" ? <Markdown text={m.content} /> : m.content}
               </div>
               {m.role === "assistant" && <Citations items={m.citations} />}
               {m.role === "assistant" && m.grounded === false && (
@@ -189,6 +218,6 @@ function GeminiChat({ files }) {
   );
 }
 
-window.ConsoleGeminiChat = GeminiChat;
+window.ConsoleFireworksChat = FireworksChat;
 
 })();

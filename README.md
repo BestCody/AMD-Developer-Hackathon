@@ -8,12 +8,11 @@ The repository includes:
 
 - A Python conversion pipeline
 - A command-line interface
-- An authenticated browser console
-- A Gemini-named document assistant with grounded answers and citations
+- An authenticated browser console with a file browser, global search, and
+  multi-user chat
+- A `@fireworks` document assistant with grounded answers, citations, and an
+  agentic tool-calling loop
 - Optional Weaviate storage
-
-> The console calls the assistant **Gemini**, but the current chat and image
-> backends use Fireworks models. The UI name does not change the model provider.
 
 ## How it works
 
@@ -34,17 +33,51 @@ without OCR. Scanned PDFs can be retried with OCR when `DOCLING_OCR=auto`.
 
 ## Browser console
 
-The console supports this flow:
+The console is a single-page application with three tabs and a global
+command-palette search overlay.
+
+### Upload tab — file browser
 
 1. Create an account or sign in.
-2. Drop a file into the upload area.
-3. Watch the real pipeline stage and percentage.
-4. On success, see a centered checkmark confirmation.
-5. After 1.8 seconds, return to the upload area while the document remains in
-   the Documents panel.
-6. Open a converted document to view its UIR or UMR result.
-7. Ask Gemini questions about converted documents. Answers include the source
-   chunks sent to the model.
+2. Drop a file into the upload area or pick a folder from the left tree.
+3. Watch the real pipeline stage and percentage on the file card.
+4. Files open only on an explicit click, not automatically mid-upload.
+5. Folders are server-persisted (SQLite) and survive restarts.
+6. Click a finished file to open a tabbed detail pane: **Metadata**, **UMR**
+   (Markdown), **UIR** (JSON), and **Chunks**.
+7. PDFs render a thumbnail preview via the built-in `/api/thumb` endpoint.
+
+### Fireworks tab — grounded Q&A
+
+Ask questions about your converted documents. The assistant uses a Fireworks
+chat model (MiniMax-M3) with a retrieval + agentic loop:
+
+- The model can call `search` and `get_more_sources` to find more passages
+  before answering.
+- Answers are rendered as **Markdown** (bold, lists, code, tables) with
+  **DOMPurify** sanitization.
+- Every answer shows **tool-step chips** (e.g. "Searched 'invoices' — 5
+  sources") and an expandable **citations** panel with the source chunks.
+
+### Chats tab — multi-user messaging
+
+1. Start a conversation by entering a teammate's email. An **autocomplete**
+   dropdown suggests registered users as you type.
+2. Message back and forth. Messages are stored in SQLite and polled every 4
+   seconds.
+3. Type `@fireworks <question>` to ask your own documents from inside a chat.
+   The question and the assistant's answer are posted into the shared thread
+   so both members see them.
+4. Each conversation shows the peer's **full email**, a **Member / Pending**
+   badge (whether they have signed up), and the last message preview.
+
+### Global search (⌘/Ctrl+K from any tab)
+
+A command-palette overlay searches **all** converted documents by **semantic
+meaning + title priority** (BGE-small embeddings). Title-matching documents
+rank above content-only matches. Results show the document title, page
+number, and a scored snippet. Clicking a result jumps to the file in the
+Upload tab.
 
 The interface is displayed at 75% scale to match the Aperture console design.
 
@@ -198,6 +231,8 @@ container.
 
 ## Main modules
 
+### Backend (Python)
+
 | Module | Purpose |
 |---|---|
 | `pipeline.py` | Runs the complete conversion flow |
@@ -207,23 +242,67 @@ container.
 | `chunk.py` | Produces token-sized document chunks |
 | `enrich.py` | Adds entities and relationships |
 | `embed.py` | Creates BGE-small embeddings |
+| `search.py` | Semantic + title-priority passage search over UIR documents |
 | `uir_schema.py` | Defines and validates UIR v1.0 |
 | `umr.py` | Produces readable UMR Markdown |
-| `chat.py` | Retrieves chunks and produces grounded answers |
-| `auth.py` | Stores accounts and verifies passwords |
-| `conversations.py` | Stores user conversations |
-| `web.py` | Provides the Flask routes and isolated conversion worker |
+| `chat.py` | Retrieves chunks, agentic tool-calling loop, grounded answers |
+| `auth.py` | Stores accounts, verifies passwords, user search |
+| `conversations.py` | Stores multi-user chat threads and messages |
+| `library.py` | SQLite-backed folders and job persistence |
+| `web.py` | Flask routes, isolated conversion worker, file browser API |
 
-Frontend files are under `static/console/`, the shared Aperture styles are
-under `static/ds/`, and the page template is `templates/console.html`.
+### Frontend (JSX)
+
+Frontend files are under `static/console/`:
+
+| File | Purpose |
+|---|---|
+| `app.jsx` | Root component, session bootstrap, upload orchestration |
+| `FileBrowser.jsx` | Document grid, folder tree, dropzone, file detail pane |
+| `FileCard.jsx` | Conversion progress card with stage and percentage |
+| `FileTree.jsx` | Collapsible left-side folder tree |
+| `FileDetail.jsx` | Tabbed detail: Metadata, UMR, UIR, Chunks, thumbnail |
+| `CopilotChat.jsx` | Fireworks Q&A with markdown, citations, tool-step chips |
+| `ChatsPanel.jsx` | Conversation list, thread, new-chat email autocomplete |
+| `GlobalSearch.jsx` | Command-palette overlay: semantic search across documents |
+| `IconRail.jsx` | Left navigation rail with Upload, Fireworks, Chats, Search |
+| `Markdown.jsx` | `marked` + `DOMPurify` renderer for chat answers |
+| `AuthScreens.jsx` | Sign-in and sign-up forms |
+| `api.js` | Fetch wrapper for all backend endpoints |
+
+The shared Aperture design-system styles are under `static/ds/`, and the page
+template is `templates/console.html`.
+
+## API overview
+
+The console backend exposes these authenticated endpoints (in addition to the
+auth routes above):
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/run` | `POST` | Upload a file, start a conversion job |
+| `/api/status/<id>` | `GET` | Poll job stage, percentage, and result |
+| `/api/result/<id>` | `GET` | Full or intent-filtered UIR JSON |
+| `/api/umr/<id>` | `GET` | Markdown UMR companion |
+| `/api/download/<id>` | `GET` | Download the full UIR JSON |
+| `/api/thumb/<id>` | `GET` | PNG thumbnail of the first PDF page |
+| `/api/jobs` | `GET` / `PATCH` / `DELETE` | List, move, or delete a job |
+| `/api/folders` | `GET` / `POST` / `PATCH` / `DELETE` | Folder CRUD |
+| `/api/search` | `POST` | Semantic + title-priority passage search |
+| `/api/chat` | `POST` | Grounded Q&A with tool-calling agent loop |
+| `/api/conversations` | `GET` / `POST` | List or start a chat thread |
+| `/api/conversations/<id>/messages` | `GET` / `POST` | Read or send messages |
+| `/api/users/search` | `GET` | Autocomplete: registered users by email prefix |
 
 ## Current limitations
 
 - Docling may not fit comfortably on an 8 GB machine while browsers and other
-  development tools are open.
+  development tools are open. On macOS the default soft FD limit is 256; the
+  server now raises this automatically, but very large model loads may still
+  strain memory.
 - Image conversion and assistant answers depend on an external Fireworks API.
-- The browser server keeps job state in memory. Restarting it clears the job
-  list, although previously written output files remain on disk.
+- The browser server persists jobs and folders in SQLite, so they survive
+  restarts. The in-memory job queue is rebuilt on startup from the database.
 - The Flask development server is intended for local testing, not public
   deployment.
 - AMD ROCm support is designed into device selection but has not been fully

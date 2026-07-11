@@ -165,6 +165,53 @@ def test_index_renders(client):
     assert b"console/app.jsx" in resp.data
 
 
+def test_static_assets_set_no_store_cache_header(tmp_path, monkeypatch):
+    """Babel fetches our .jsx / .js over XHR; a cached stale body surfaces
+    as a ghostly SyntaxError long after a file is removed (see
+    ``error.tmp`` and commit 56de9e8 "Remove the Intent field from the
+    upload stage" for the failure mode). The console disables caching on
+    ``/static/*`` so the browser always pulls fresh bytes. Hooked in
+    :func:`uir_pipeline.web.create_app` via ``_no_store_on_static``.
+    """
+    # ``monkeypatch`` auto-restores; touching ``os.environ`` directly would
+    # leak ``SECRET_KEY`` into the rest of the suite if this test fails.
+    monkeypatch.setenv("SECRET_KEY", "test-secret-not-random")
+    app = create_app(
+        upload_dir=tmp_path / "u",
+        output_dir=tmp_path / "o",
+        data_dir=tmp_path / "d",
+        execution="thread",
+    )
+    c = app.test_client()
+    # Both must exist and carry no-store. ``api.js`` is plain JS; ``app.jsx``
+    # is the file Babel is most likely to reparse, so it's the most
+    # user-visible regression case.
+    for path in ("/static/console/api.js", "/static/console/app.jsx"):
+        r = c.get(path)
+        assert r.status_code == 200, f"{path} not served: {r.status_code}"
+        assert r.headers.get("Cache-Control") == "no-store", (
+            f"{path} expected Cache-Control: no-store, got "
+            f"{r.headers.get('Cache-Control')!r}"
+        )
+    # Sanity: the hook is scoped to Flask's static endpoint. A /api route
+    # must keep its default caching behaviour -- otherwise we would be
+    # blanket-disabling HTTP caches across the whole JSON API, which is
+    # unrelated to the Babel-in-the-browser failure mode we are guarding.
+    # Note: ``r.headers.get(...)`` returns ``None`` (not ``"None"``) when
+    # the header is absent, so a naive ``!= "no-store"`` would pass for the
+    # wrong reason -- the helper accepts *either* absence *or* a non-no-store
+    # value.
+    def _header_is_not_no_store(headers) -> bool:
+        cc = headers.get("Cache-Control")
+        return cc is None or cc != "no-store"
+
+    r = c.get("/api/health")
+    assert r.status_code == 200
+    assert _header_is_not_no_store(r.headers), (
+        "_no_store_on_static must not affect /api/* responses"
+    )
+
+
 def test_run_rejects_missing_file(client):
     resp = client.post("/api/run", data={}, content_type="multipart/form-data")
     assert resp.status_code == 400

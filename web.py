@@ -93,7 +93,7 @@ def main() -> int:
     # AirPlay Receiver (ControlCe), which silently intercepts our bind.
     port = int(os.environ.get("PORT", "5050"))
     # Loopback by default: this console has user accounts (see module docstring).
-    host = os.environ.get("HOST", "127.0.0.1")
+    host = os.environ.get("HOST", "0.0.0.0")
 
     from uir_pipeline.web import (
         assert_safe_bind,

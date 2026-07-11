@@ -1,7 +1,7 @@
 """tests/test_web_conversations.py -- the Chats panel's HTTP surface.
 
 Exercises /api/conversations as a multi-user messaging surface: two accounts
-share a thread, a third cannot see it, and the ``gemini:`` command answers
+share a thread, a third cannot see it, and the ``@fireworks`` command answers
 from the sender's documents. The model layer is stubbed so no network or API
 key is needed.
 """
@@ -9,34 +9,38 @@ from __future__ import annotations
 
 import pytest
 
-from uir_pipeline.web import _gemini_question, create_app
+from uir_pipeline.web import _fireworks_question, create_app
 
 
 # ----------------------------------------------------------------------------
-# The gemini: trigger parser (pure)
+# The @fireworks trigger parser (pure)
 # ----------------------------------------------------------------------------
 
-class TestGeminiQuestion:
+class TestFireworksQuestion:
     def test_plain_text_is_not_a_command(self):
-        assert _gemini_question("hey, did you see the deck?") is None
+        assert _fireworks_question("hey, did you see the deck?") is None
 
     def test_extracts_the_question(self):
-        assert _gemini_question("gemini: what is attention") == "what is attention"
+        assert _fireworks_question("@fireworks what is attention") == "what is attention"
 
     def test_is_case_insensitive(self):
-        assert _gemini_question("GEMINI: hello") == "hello"
-        assert _gemini_question("Gemini:  hi ") == "hi"
+        assert _fireworks_question("@FIREWORKS hello") == "hello"
+        assert _fireworks_question("@Fireworks  hi ") == "hi"
 
     def test_leading_whitespace_allowed(self):
-        assert _gemini_question("   gemini: x") == "x"
+        assert _fireworks_question("   @fireworks x") == "x"
 
     def test_empty_question_is_empty_string_not_none(self):
-        assert _gemini_question("gemini:") == ""
-        assert _gemini_question("gemini:    ") == ""
+        assert _fireworks_question("@fireworks ") == ""
+        assert _fireworks_question("@fireworks    ") == ""
 
-    def test_gemini_not_at_start_is_a_message(self):
-        assert _gemini_question("ask gemini: later") is None
-        assert _gemini_question("regemini: no") is None
+    def test_fireworks_not_at_start_is_a_message(self):
+        assert _fireworks_question("ask @fireworks later") is None
+
+    def test_word_boundary_required(self):
+        # @fireworksly must not match because of the word boundary \b
+        assert _fireworks_question("@fireworksly no") is None
+        assert _fireworks_question("@fireworksly: no") is None
 
 
 # ----------------------------------------------------------------------------
@@ -127,7 +131,7 @@ class TestConversationRoutes:
 
 
 # ----------------------------------------------------------------------------
-# Messaging between users + the gemini command
+# Messaging between users + the @fireworks command
 # ----------------------------------------------------------------------------
 
 class TestMessaging:
@@ -149,13 +153,13 @@ class TestMessaging:
         msgs = bob.get(f"/api/conversations/{cid}/messages").get_json()["messages"]
         assert [(m["sender_email"], m["content"]) for m in msgs] == [("alice@example.com", "did you see the deck?")]
 
-    def test_gemini_empty_question_rejected_and_stores_nothing(self, alice):
+    def test_fireworks_empty_question_rejected_and_stores_nothing(self, alice):
         cid = self._thread(alice)
-        resp = alice.post(f"/api/conversations/{cid}/messages", json={"text": "gemini:   "})
+        resp = alice.post(f"/api/conversations/{cid}/messages", json={"text": "@fireworks    "})
         assert resp.status_code == 400
         assert alice.get(f"/api/conversations/{cid}/messages").get_json()["messages"] == []
 
-    def test_gemini_command_answers_from_sender_docs_and_shares_the_reply(self, app, monkeypatch):
+    def test_fireworks_command_answers_from_sender_docs_and_shares_the_reply(self, app, monkeypatch):
         alice = _signup(app, "alice@example.com")
         bob = _signup(app, "bob@example.com")
         cid = alice.post("/api/conversations", json={"peer_email": "bob@example.com"}).get_json()["conversation"]["id"]
@@ -165,13 +169,14 @@ class TestMessaging:
         monkeypatch.setattr(chat_mod, "retrieve",
                             lambda paths, message: (seen.update(message=message) or [{"doc_title": "p", "page": 1, "text": "...", "score": 0.9}]))
         monkeypatch.setattr(chat_mod, "answer",
-                            lambda message, contexts, history=None: {
+                            lambda message, contexts, history=None, **kw: {
                                 "success": True, "answer": "Attention weighs tokens.",
                                 "citations": contexts, "cited": contexts,
-                                "invalid_citations": [], "grounded": True, "model": "stub"})
+                                "invalid_citations": [], "grounded": True, "model": "stub",
+                                "tool_steps": []})
         _seed_done_job(alice)
 
-        resp = alice.post(f"/api/conversations/{cid}/messages", json={"text": "gemini: what is attention"})
+        resp = alice.post(f"/api/conversations/{cid}/messages", json={"text": "@fireworks what is attention"})
         assert resp.status_code == 200, resp.get_data(as_text=True)
         assert seen["message"] == "what is attention"  # prefix stripped
         body = resp.get_json()
@@ -183,7 +188,7 @@ class TestMessaging:
         assert msgs[0]["sender_email"] == "alice@example.com"
         assert msgs[1]["content"] == "Attention weighs tokens."
 
-    def test_gemini_model_failure_keeps_the_question_and_fakes_no_reply(self, app, monkeypatch):
+    def test_fireworks_model_failure_keeps_the_question_and_fakes_no_reply(self, app, monkeypatch):
         alice = _signup(app, "alice@example.com")
         _signup(app, "bob@example.com")
         cid = alice.post("/api/conversations", json={"peer_email": "bob@example.com"}).get_json()["conversation"]["id"]
@@ -191,18 +196,18 @@ class TestMessaging:
         import uir_pipeline.chat as chat_mod
         monkeypatch.setattr(chat_mod, "retrieve", lambda paths, m: [{"text": "x"}])
         monkeypatch.setattr(chat_mod, "answer",
-                            lambda m, c, history=None: {"success": False, "error": "no FIREWORKS_API_KEY"})
+                            lambda m, c, history=None, **kw: {"success": False, "error": "no FIREWORKS_API_KEY"})
         _seed_done_job(alice)
 
-        resp = alice.post(f"/api/conversations/{cid}/messages", json={"text": "gemini: anything"})
+        resp = alice.post(f"/api/conversations/{cid}/messages", json={"text": "@fireworks anything"})
         assert resp.status_code == 502
         assert "FIREWORKS" in resp.get_json()["error"]
         msgs = alice.get(f"/api/conversations/{cid}/messages").get_json()["messages"]
         assert [m["role"] for m in msgs] == ["user"]  # question kept, no assistant
 
-    def test_gemini_with_no_documents_uses_the_no_docs_branch(self, alice):
+    def test_fireworks_with_no_documents_uses_the_no_docs_branch(self, alice):
         cid = self._thread(alice)
-        resp = alice.post(f"/api/conversations/{cid}/messages", json={"text": "gemini: what is X"})
+        resp = alice.post(f"/api/conversations/{cid}/messages", json={"text": "@fireworks what is X"})
         assert resp.status_code == 200
         assert "haven't converted any documents" in resp.get_json()["reply"]["content"]
 

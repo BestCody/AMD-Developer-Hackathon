@@ -9,12 +9,12 @@
  *     email. You start one from the "+" screen by entering an address (they
  *     see the thread when they sign up with it). Both members share the
  *     messages; the thread polls so the other person's replies appear.
- *   - Within a thread, a message that starts with "gemini:" is a command:
+ *   - Within a thread, a message that starts with "@fireworks" is a command:
  *     the remainder is answered from *your* converted documents (the same
  *     grounded retrieval the Copilot tab uses) and the reply is posted into
  *     the shared thread, so both people see the question and the answer.
  *
- * "gemini:" is the product's chosen invocation word; the model behind it is
+ * "@fireworks" is the product's chosen invocation word; the model behind it is
  * Fireworks, the same one Copilot uses.
  *
  * IIFE-wrapped: see app.jsx.
@@ -22,12 +22,41 @@
 
 (function () {
 
-const GEMINI_HINT = 'Message, or type "gemini: <question>" to ask your documents';
+const FIREWORKS_HINT = 'Message, or type "@fireworks <question>" to ask your documents';
 const POLL_MS = 4000;
 
-/** Strip a leading "gemini:" (any case) -> the question, or null for a message. */
-function geminiQuestion(text) {
-  const m = /^\s*gemini:\s*/i.exec(text || "");
+const Markdown = window.ConsoleMarkdown;
+const { Badge } = window.ApertureDesignSystem_0a9afd;
+
+/** Compact chips showing the agent's tool calls before a fireworks answer. */
+function ToolSteps({ steps }) {
+  if (!steps || !steps.length) return null;
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 6, marginLeft: 30 }}>
+      {steps.map((s, i) => {
+        const isMore = s.tool === "get_more_sources";
+        const label = isMore
+          ? `Fetched ${s.n_results} more source${s.n_results === 1 ? "" : "s"}`
+          : `Searched “${s.query}” — ${s.n_results} source${s.n_results === 1 ? "" : "s"}`;
+        return (
+          <span key={i} style={{
+            display: "inline-flex", alignItems: "center", gap: 5,
+            background: "var(--gray-100)", color: "var(--text-muted-80)",
+            borderRadius: "var(--radius-pill)", padding: "3px 10px",
+            fontSize: "var(--text-micro-legal-size)", fontWeight: 600,
+          }}>
+            <i data-lucide={isMore ? "plus-circle" : "search"} style={{ width: 12, height: 12 }} />
+            {label}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Strip a leading "@fireworks" (any case) -> the question, or null for a message. */
+function fireworksQuestion(text) {
+  const m = /^\s*@fireworks\b\s*/i.exec(text || "");
   return m ? text.slice(m[0].length).trim() : null;
 }
 
@@ -74,7 +103,7 @@ function Citations({ items }) {
 function Message({ m, myEmail }) {
   const isAssistant = m.role === "assistant";
   const mine = !isAssistant && (m.sender_email || "").toLowerCase() === myEmail;
-  const isCommand = mine && geminiQuestion(m.content) !== null;
+  const isCommand = mine && fireworksQuestion(m.content) !== null;
   return (
     <div style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start", alignItems: "flex-end", gap: 8 }}>
       {isAssistant && (
@@ -83,21 +112,22 @@ function Message({ m, myEmail }) {
         </div>
       )}
       <div style={{ maxWidth: "74%" }}>
+        {isAssistant && <ToolSteps steps={m.tool_steps} />}
         <div
           style={{
             padding: "12px 16px",
             borderRadius: "var(--radius-lg)",
             fontSize: "var(--text-body-size)",
             lineHeight: "var(--text-body-leading)",
-            whiteSpace: "pre-wrap",
+            whiteSpace: isAssistant ? "normal" : "pre-wrap",
             background: mine ? "var(--accent-primary)" : isAssistant ? "var(--blue-50)" : "var(--gray-100)",
             color: mine ? "var(--on-accent)" : "var(--text-ink)",
           }}
         >
-          {m.content}
+          {isAssistant ? <Markdown text={m.content} /> : m.content}
         </div>
         {isCommand && (
-          <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-muted-48)", textAlign: "right" }}>asked Gemini</div>
+          <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-muted-48)", textAlign: "right" }}>asked Fireworks</div>
         )}
         {isAssistant && <Citations items={m.citations} />}
         {isAssistant && m.grounded === false && (
@@ -121,9 +151,12 @@ function ChatsPanel({ user }) {
   const [showNew, setShowNew] = React.useState(false);
   const [newEmail, setNewEmail] = React.useState("");
   const [newError, setNewError] = React.useState("");
+  const [newSuggestions, setNewSuggestions] = React.useState([]);
+  const newSuggestTimer = React.useRef(null);
 
   const [openId, setOpenId] = React.useState(null);
   const [peer, setPeer] = React.useState("");
+  const [peerRegistered, setPeerRegistered] = React.useState(false);
   const [messages, setMessages] = React.useState([]);
   const [threadLoading, setThreadLoading] = React.useState(false);
   const [draft, setDraft] = React.useState("");
@@ -131,6 +164,8 @@ function ChatsPanel({ user }) {
   const [error, setError] = React.useState("");
   const scrollRef = React.useRef(null);
   const busyRef = React.useRef(false);
+  const msgInputRef = React.useRef(null);
+  const [cmdDrop, setCmdDrop] = React.useState(false);
   React.useEffect(() => { busyRef.current = busy; }, [busy]);
 
   React.useEffect(() => { if (window.lucide) window.lucide.createIcons(); });
@@ -159,7 +194,10 @@ function ChatsPanel({ user }) {
     if (!quiet) setThreadLoading(true);
     try {
       const { conversation, messages: msgs } = await API.conversationMessages(cid);
-      if (conversation) setPeer(conversation.peer_email || "");
+      if (conversation) {
+        setPeer(conversation.peer_email || "");
+        setPeerRegistered(!!conversation.peer_registered);
+      }
       setMessages(msgs);
     } catch (err) {
       if (bounceIfUnauth(err)) return;
@@ -169,9 +207,10 @@ function ChatsPanel({ user }) {
     }
   }
 
-  function openThread(cid, peerEmail) {
+  function openThread(cid, peerEmail, isReg) {
     setOpenId(cid);
     setPeer(peerEmail || "");
+    setPeerRegistered(!!isReg);
     setMessages([]);
     setError("");
     setShowNew(false);
@@ -194,7 +233,7 @@ function ChatsPanel({ user }) {
       const { conversation } = await API.createConversation(email);
       setNewEmail("");
       await refreshList();
-      openThread(conversation.id, conversation.peer_email);
+      openThread(conversation.id, conversation.peer_email, conversation.peer_registered);
     } catch (err) {
       if (bounceIfUnauth(err)) return;
       setNewError(err.message);
@@ -217,7 +256,7 @@ function ChatsPanel({ user }) {
     if (!text || busy || openId == null) return;
     setError("");
     setDraft("");
-    const isCommand = geminiQuestion(text) !== null;
+    const isCommand = fireworksQuestion(text) !== null;
     setMessages((m) => [...m, { id: `pending-${Date.now()}`, role: "user", sender_email: myEmail, content: text }]);
     setBusy(true);
     try {
@@ -231,7 +270,7 @@ function ChatsPanel({ user }) {
       refreshList();
     } catch (err) {
       if (bounceIfUnauth(err)) return;
-      setError(isCommand ? `Gemini couldn't answer: ${err.message}` : err.message);
+      setError(isCommand ? `Fireworks couldn't answer: ${err.message}` : err.message);
     } finally {
       setBusy(false);
     }
@@ -254,15 +293,59 @@ function ChatsPanel({ user }) {
         <div style={{ fontSize: "var(--text-caption-size)", color: "var(--text-muted-48)" }}>
           Enter the email of the person you want to chat with.
         </div>
-        <input
-          type="email"
-          value={newEmail}
-          onChange={(e) => setNewEmail(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && startChat()}
-          placeholder="name@company.com"
-          autoFocus
-          style={{ width: "100%", fontFamily: "var(--font-text)", fontSize: "var(--text-body-size)", color: "var(--text-ink)", background: "var(--surface-canvas)", border: "1px solid var(--border-hairline)", borderRadius: "var(--radius-sm)", height: 48, padding: "0 16px", outline: "none", boxSizing: "border-box" }}
-        />
+        <div style={{ position: "relative" }}>
+          <input
+            type="email"
+            value={newEmail}
+            onChange={(e) => {
+              const v = e.target.value;
+              setNewEmail(v);
+              setNewSuggestions([]);
+              if (newSuggestTimer.current) clearTimeout(newSuggestTimer.current);
+              if (v.trim().length < 2) return;
+              newSuggestTimer.current = setTimeout(() => {
+                API.searchUsers(v.trim())
+                  .then(({ users }) => setNewSuggestions(users || []))
+                  .catch(() => {});
+              }, 200);
+            }}
+            onBlur={() => setTimeout(() => setNewSuggestions([]), 150)}
+            onKeyDown={(e) => e.key === "Enter" && startChat()}
+            placeholder="name@company.com"
+            autoFocus
+            style={{ width: "100%", fontFamily: "var(--font-text)", fontSize: "var(--text-body-size)", color: "var(--text-ink)", background: "var(--surface-canvas)", border: "1px solid var(--border-hairline)", borderRadius: "var(--radius-sm)", height: 48, padding: "0 16px", outline: "none", boxSizing: "border-box" }}
+          />
+          {newSuggestions.length > 0 && (
+            <div style={{
+              position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0,
+              background: "var(--surface-canvas)", border: "1px solid var(--border-hairline)",
+              borderRadius: "var(--radius-sm)", maxHeight: 200, overflow: "auto",
+              zIndex: 10, boxShadow: "var(--shadow-ring)",
+            }}>
+              {newSuggestions.map((u) => (
+                <button
+                  key={u.id}
+                  onClick={() => { setNewEmail(u.email); setNewSuggestions([]); }}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 10,
+                    width: "100%", padding: "10px 14px", border: "none",
+                    background: "transparent", cursor: "pointer", textAlign: "left",
+                    fontFamily: "var(--font-text)", fontSize: "var(--text-body-size)",
+                    color: "var(--text-ink)", borderBottom: "1px solid var(--border-hairline)",
+                  }}
+                  onMouseEnter={(e) => e.currentTarget.style.background = "var(--surface-parchment)"}
+                  onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
+                >
+                  <i data-lucide="user" style={{ width: 14, height: 14, color: "var(--text-muted-48)", flexShrink: 0 }} />
+                  <div style={{ overflow: "hidden" }}>
+                    <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{u.email}</div>
+                    <div style={{ fontSize: "var(--text-caption-size)", color: "var(--text-muted-48)" }}>{u.name || "No name"}</div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         {newError && (
           <div role="alert" style={{ background: "var(--status-error-bg)", color: "var(--status-error)", borderRadius: "var(--radius-sm)", padding: "10px 14px", fontSize: "var(--text-caption-size)" }}>
             {newError}
@@ -290,8 +373,18 @@ function ChatsPanel({ user }) {
           >
             <i data-lucide="chevron-left" style={{ width: 20, height: 20 }}></i>
           </button>
-          <div title={peer} style={{ fontFamily: "var(--font-display)", fontSize: "var(--text-tagline-size)", fontWeight: 600, color: "var(--text-ink)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {nameOf(peer)}
+          <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", gap: 2 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, overflow: "hidden" }}>
+              <span style={{ fontFamily: "var(--font-display)", fontSize: "var(--text-tagline-size)", fontWeight: 600, color: "var(--text-ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {nameOf(peer)}
+              </span>
+              <Badge kind={peerRegistered ? "success" : "neutral"} style={{ padding: "2px 8px", fontSize: "var(--text-micro-legal-size)", flexShrink: 0 }}>
+                {peerRegistered ? "Member" : "Pending"}
+              </Badge>
+            </div>
+            <div style={{ fontSize: "var(--text-caption-size)", color: "var(--text-muted-48)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {peer}
+            </div>
           </div>
           <button
             onClick={() => leaveChat(openId)}
@@ -306,7 +399,7 @@ function ChatsPanel({ user }) {
           {threadLoading && <div style={{ color: "var(--text-muted-48)", fontSize: "var(--text-caption-size)" }}>Loading…</div>}
           {!threadLoading && messages.length === 0 && (
             <div style={{ color: "var(--text-muted-48)", fontSize: "var(--text-body-size)", marginTop: 8 }}>
-              Say hi to {nameOf(peer)}, or start with <b>gemini:</b> to ask your documents.
+              Say hi to {nameOf(peer)}, or start with <b>@fireworks</b> to ask your documents.
             </div>
           )}
           {messages.map((m) => <Message key={m.id} m={m} myEmail={myEmail} />)}
@@ -314,7 +407,7 @@ function ChatsPanel({ user }) {
           {busy && (
             <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--text-muted-48)", fontSize: "var(--text-caption-size)" }}>
               <div className="ap-spin" style={{ width: 14, height: 14, borderRadius: "50%", border: "2px solid var(--gray-200)", borderTopColor: "var(--accent-primary)" }} />
-              {geminiQuestion(draft) !== null ? "Searching your documents…" : "Sending…"}
+              {fireworksQuestion(draft) !== null ? "Searching your documents…" : "Sending…"}
             </div>
           )}
           {error && (
@@ -325,14 +418,44 @@ function ChatsPanel({ user }) {
         </div>
 
         <div style={{ padding: "0 8px 28px", display: "flex", gap: 10, alignItems: "center" }}>
-          <input
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-            placeholder={GEMINI_HINT}
-            disabled={busy}
-            style={{ flex: 1, fontFamily: "var(--font-text)", fontSize: "var(--text-body-size)", color: "var(--text-ink)", background: "var(--surface-canvas)", border: "1px solid var(--border-hairline)", borderRadius: "var(--radius-pill)", height: 48, padding: "0 20px", outline: "none" }}
-          />
+          <div style={{ position: "relative", flex: 1 }}>
+            <input
+              ref={msgInputRef}
+              value={draft}
+              onChange={(e) => {
+                const v = e.target.value;
+                setDraft(v);
+                const t = v.trimStart();
+                setCmdDrop(t.startsWith("@") && (t === "@" || t[1] !== " "));
+              }}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+              placeholder={FIREWORKS_HINT}
+              disabled={busy}
+              style={{ width: "100%", fontFamily: "var(--font-text)", fontSize: "var(--text-body-size)", color: "var(--text-ink)", background: "var(--surface-canvas)", border: "1px solid var(--border-hairline)", borderRadius: "var(--radius-pill)", height: 48, padding: "0 20px", outline: "none", boxSizing: "border-box" }}
+            />
+            {cmdDrop && (
+              <div style={{
+                position: "absolute", bottom: "calc(100% + 4px)", left: 0, right: 0,
+                background: "var(--surface-canvas)", border: "1px solid var(--border-hairline)",
+                borderRadius: "var(--radius-sm)", boxShadow: "var(--shadow-ring)", zIndex: 10,
+              }}>
+                <button
+                  onClick={() => { setDraft("@fireworks "); setCmdDrop(false); setTimeout(() => msgInputRef.current && msgInputRef.current.focus(), 0); }}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "10px 14px",
+                    border: "none", background: "transparent", cursor: "pointer", textAlign: "left",
+                    fontFamily: "var(--font-text)", fontSize: "var(--text-body-size)", color: "var(--text-ink)",
+                  }}
+                  onMouseEnter={(e) => e.currentTarget.style.background = "var(--surface-parchment)"}
+                  onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
+                >
+                  <i data-lucide="at-sign" style={{ width: 14, height: 14, color: "var(--text-muted-48)" }} />
+                  <span style={{ fontWeight: 600 }}>@fireworks</span>
+                  <span style={{ color: "var(--text-muted-48)", fontSize: "var(--text-caption-size)" }}>Ask your documents</span>
+                </button>
+              </div>
+            )}
+          </div>
           <button
             onClick={send} aria-label="Send" disabled={busy || !draft.trim()}
             style={{ width: 48, height: 48, borderRadius: "var(--radius-full)", border: "none", background: busy || !draft.trim() ? "var(--gray-200)" : "var(--accent-primary)", color: "var(--on-accent)", display: "flex", alignItems: "center", justifyContent: "center", cursor: busy || !draft.trim() ? "not-allowed" : "pointer", flexShrink: 0 }}
@@ -355,7 +478,7 @@ function ChatsPanel({ user }) {
         Chats
       </div>
       <div style={{ padding: "0 8px 18px", fontSize: "var(--text-caption-size)", color: "var(--text-muted-48)" }}>
-        Message a teammate by email. Inside a chat, start a line with <b>gemini:</b> to ask your converted documents.
+        Message a teammate by email. Inside a chat, start a line with <b>@fireworks</b> to ask your converted documents.
       </div>
 
       <div style={{ padding: "0 8px 16px", display: "flex", gap: 10, alignItems: "center" }}>
@@ -398,16 +521,21 @@ function ChatsPanel({ user }) {
               style={{ display: "flex", alignItems: "center", gap: 14, padding: "14px 8px", borderBottom: "1px solid var(--border-hairline)" }}
             >
               <button
-                onClick={() => openThread(c.id, c.peer_email)}
+                onClick={() => openThread(c.id, c.peer_email, c.peer_registered)}
                 style={{ display: "flex", alignItems: "center", gap: 14, flex: 1, minWidth: 0, border: "none", background: "transparent", cursor: "pointer", textAlign: "left", padding: 0 }}
               >
                 <div style={{ width: 40, height: 40, borderRadius: "50%", background: "var(--gray-100)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, color: "var(--text-muted-80)" }}>
                   <i data-lucide="user" style={{ width: 18, height: 18 }}></i>
                 </div>
                 <div style={{ overflow: "hidden" }}>
-                  <div style={{ fontSize: "var(--text-body-strong-size)", fontWeight: "var(--text-body-strong-weight)", color: "var(--text-ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={c.peer_email}>{nameOf(c.peer_email)}</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: "var(--text-body-strong-size)", fontWeight: "var(--text-body-strong-weight)", color: "var(--text-ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {nameOf(c.peer_email)}
+                    <Badge kind={c.peer_registered ? "success" : "neutral"} style={{ padding: "2px 8px", fontSize: "var(--text-micro-legal-size)" }}>
+                      {c.peer_registered ? "Member" : "Pending"}
+                    </Badge>
+                  </div>
                   <div style={{ fontSize: "var(--text-caption-size)", color: c.last_role === "assistant" ? "var(--accent-primary)" : "var(--text-muted-48)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {c.preview || "No messages yet"}
+                    {c.peer_email} — {c.preview || "No messages yet"}
                   </div>
                 </div>
               </button>

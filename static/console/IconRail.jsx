@@ -1,4 +1,4 @@
-/* IconRail.jsx -- left rail: Upload / Gemini, plus the signed-in user.
+/* IconRail.jsx -- left rail: Upload / Fireworks, plus the signed-in user.
  *
  * The design kit's rail had a third "Profile → Chats" tab backed by a
  * hardcoded list of fictional conversations ("Priya Shah", "Marcus Lee").
@@ -10,10 +10,10 @@
 
 (function () {
 
-function IconRail({ active, onChange, user, onLogout }) {
+function IconRail({ active, onChange, user, onLogout, onOpenSearch }) {
   const items = [
     { id: "upload", label: "Upload", icon: "upload-cloud" },
-    { id: "gemini", label: "Gemini", icon: "sparkles" },
+    { id: "fireworks", label: "Fireworks", icon: "sparkles" },
   ];
 
   React.useEffect(() => {
@@ -74,6 +74,29 @@ function IconRail({ active, onChange, user, onLogout }) {
           </button>
         );
       })}
+
+      {/* Global document search -- opens a command-palette-style overlay that
+          searches every converted document (content semantics + title, title
+          first) and jumps to the result's file. Available from any tab. */}
+      <button
+        onClick={onOpenSearch}
+        aria-label="Search documents"
+        title="Search documents"
+        style={{
+          width: 64, height: 64, borderRadius: "var(--radius-md)",
+          border: "none", background: "transparent",
+          color: "var(--text-muted-on-dark)",
+          display: "flex", flexDirection: "column", alignItems: "center",
+          justifyContent: "center", gap: 4, cursor: "pointer",
+          transition: "background var(--duration-fast) ease, color var(--duration-fast) ease, transform var(--duration-press) var(--ease-standard)",
+        }}
+        onMouseDown={(e) => (e.currentTarget.style.transform = "scale(var(--scale-press))")}
+        onMouseUp={(e) => (e.currentTarget.style.transform = "scale(1)")}
+        onMouseLeave={(e) => (e.currentTarget.style.transform = "scale(1)")}
+      >
+        <i data-lucide="search" style={{ width: 26, height: 26 }}></i>
+        <span style={{ fontSize: 11, fontWeight: 600 }}>Search</span>
+      </button>
 
       <div style={{ flex: 1 }} />
 

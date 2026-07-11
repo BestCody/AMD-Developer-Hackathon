@@ -36,6 +36,8 @@ import re
 from pathlib import Path
 from typing import Any, Final
 
+import requests as _requests
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_CHAT_MODEL: Final[str] = "accounts/fireworks/models/minimax-m3"
@@ -85,6 +87,85 @@ _SYSTEM_PROMPT: Final[str] = (
     "- Never invent a citation number that wasn't given to you.\n"
     "- Be concise and factual. Quote figures and names exactly as written."
 )
+
+#: Agentic variant: the model may call tools to find or broaden passages.
+#: The cite-only-from-passages rules are unchanged; tools just let it gather
+#: more passages before answering.
+_SYSTEM_PROMPT_TOOLS: Final[str] = (
+    "You answer questions about the user's documents using ONLY the "
+    "numbered context passages provided -- including any you fetch yourself "
+    "via the tools.\n\n"
+    "Rules:\n"
+    "- Ground every claim in a passage and cite it inline as [1], [2], etc. "
+    "The numbers continue across tool results, so a passage a tool returned "
+    "as [7] is cited as [7].\n"
+    "- If the passages do not contain the answer, say exactly: "
+    "\"I can't answer that from the documents you've converted.\" "
+    "Do not guess, and do not fall back on general knowledge.\n"
+    "- Never invent a citation number that wasn't given to you.\n"
+    "- Be concise and factual. Quote figures and names exactly as written.\n"
+    "- Call `search` to find passages the initial context didn't surface, or "
+    "`get_more_sources` to broaden coverage. Then answer with [n] citations."
+)
+
+#: OpenAI-style tool schema the Fireworks endpoint accepts (verified against
+#: MiniMax-M3: it returns ``finish_reason: tool_calls`` with parsed args).
+_TOOLS: Final[list[dict[str, Any]]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search",
+            "description": (
+                "Search the user's converted documents for passages matching "
+                "a query. Title-matching documents rank first. Use this when "
+                "the initial context doesn't surface the answer."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query."},
+                    "top_k": {"type": "integer", "description": "Max passages to return.", "default": 6},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_more_sources",
+            "description": (
+                "Fetch additional passages beyond those already provided, "
+                "for broader coverage of the question."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Query to find more passages for."},
+                    "top_k": {"type": "integer", "description": "Max passages to return.", "default": 6},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+]
+
+
+def _run_tool(name: str, args: dict[str, Any], docs: list[dict[str, Any]], fallback_query: str) -> list[dict[str, Any]]:
+    """Execute one agent tool call, returning passage dicts (possibly empty).
+
+    Both ``search`` and ``get_more_sources`` call :func:`uir_pipeline.search
+    .search` over the caller's docs -- they differ only in how the model is
+    told to use them. ``docs`` is the caller's DONE-job list the web layer
+    built, so tool execution respects document ownership without the model
+    ever seeing a filesystem path.
+    """
+    q = (args.get("query") or fallback_query or "").strip()
+    top_k = int(args.get("top_k") or 6)
+    if not docs or not q:
+        return []
+    from uir_pipeline.search import search as _search
+    return _search(docs, q, top_k=top_k)
 
 
 # ----------------------------------------------------------------------------
@@ -209,13 +290,15 @@ def _get_base_url() -> str:
     return os.environ.get("FIREWORKS_BASE_URL", _DEFAULT_BASE_URL).strip().rstrip("/")
 
 
-def _format_context_block(contexts: list[dict[str, Any]]) -> str:
+def _format_context_block(contexts: list[dict[str, Any]], *, start: int = 1) -> str:
+    """Number passages ``[start]``, ``[start+1]``, ... so the agentic loop can
+    keep citation numbers continuous as tool results append new passages."""
     parts: list[str] = []
-    for i, c in enumerate(contexts, start=1):
-        loc = f"{c['doc_title']}"
+    for i, c in enumerate(contexts, start=start):
+        loc = f"{c.get('doc_title') or 'Untitled document'}"
         if c.get("page") is not None:
             loc += f", p. {c['page']}"
-        parts.append(f"[{i}] ({loc})\n{c['text']}")
+        parts.append(f"[{i}] ({loc})\n{c.get('text') or ''}")
     return "\n\n".join(parts)
 
 
@@ -268,6 +351,98 @@ def _cited_indices(reply: str, n_contexts: int) -> list[int]:
     return seen
 
 
+def _complete(
+    messages: list[dict[str, Any]],
+    *,
+    model: str,
+    api_key: str,
+    base_url: str,
+    max_tokens: int,
+    temperature: float,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """One Fireworks chat-completion call. Returns ``(message, usage)``.
+
+    Raises on transport/API failure so callers can map to the fail-soft dict.
+    Uses the module-level ``_requests`` so tests that monkeypatch
+    ``requests.post`` intercept the call.
+    """
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    if tools:
+        body["tools"] = tools
+    if tool_choice is not None:
+        body["tool_choice"] = tool_choice
+
+    response = _requests.post(
+        f"{base_url}/chat/completions",
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        json=body,
+        timeout=90,
+    )
+    response.raise_for_status()
+    data = response.json()
+    choices = data.get("choices") or []
+    if not choices:
+        raise ValueError("empty choices in Fireworks API response")
+    return choices[0].get("message", {}) or {}, data.get("usage", {}) or {}
+
+
+def _finalize(
+    reply: str,
+    gathered: list[dict[str, Any]],
+    tool_steps: list[dict[str, Any]],
+    model: str,
+    usage: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate citations against all gathered passages and shape the return."""
+    reply = (reply or "").strip()
+    reply, invalid = _validate_citations(reply, len(gathered))
+    if invalid:
+        logger.warning(
+            "chat model cited %d passage(s) that were never supplied "
+            "(%s; only %d given); markers stripped from the answer",
+            len(invalid), invalid, len(gathered),
+        )
+    return {
+        "success": True,
+        "answer": reply,
+        "citations": gathered,
+        "cited": _cited_indices(reply, len(gathered)),
+        "invalid_citations": invalid,
+        "model": model,
+        "usage": usage or {},
+        "grounded": bool(gathered),
+        "tool_steps": tool_steps,
+    }
+
+
+def _model_failure(exc: Exception, gathered, model, tool_steps) -> dict[str, Any]:
+    # Surface the status line but not the raw body: Fireworks echoes the
+    # request on some 4xx, and the request contains document text.
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    detail = f"HTTP {status}" if status else f"{type(exc).__name__}: {exc}"
+    logger.exception("fireworks chat call failed")
+    return {
+        "success": False,
+        "error": f"Chat model call failed ({detail}).",
+        "answer": "",
+        "citations": gathered,
+        "model": model,
+        "usage": {},
+        "tool_steps": tool_steps,
+    }
+
+
 def answer(
     query: str,
     contexts: list[dict[str, Any]],
@@ -276,18 +451,33 @@ def answer(
     max_tokens: int = _DEFAULT_MAX_TOKENS,
     model: str | None = None,
     temperature: float = 0.1,
+    docs: list[dict[str, Any]] | None = None,
+    job_ids: set[str] | None = None,
+    max_iterations: int = 4,
 ) -> dict[str, Any]:
     """Answer ``query`` from ``contexts`` via a Fireworks chat model.
 
-    Returns ``{success, answer, citations, model, usage, error}``. Never
-    raises: transport and API failures come back as ``success=False``
-    with a human-readable ``error``, matching
-    :func:`uir_pipeline.fireworks_vision.describe_image`.
+    Two modes:
+
+    * **Single-shot** (``docs`` is None/empty): the existing behaviour --
+      one model call over the supplied ``contexts``. Kept intact so
+      ``test_chat_citations`` and the auth tests (which monkeypatch
+      ``answer``/``retrieve``) keep working.
+    * **Agentic** (``docs`` supplied): an OpenAI-style tool-calling loop.
+      The model may call ``search`` / ``get_more_sources`` to fetch more
+      passages from the caller's documents; each call runs
+      :func:`uir_pipeline.search.search` over ``docs`` (ownership stays
+      server-side). The loop caps at ``max_iterations`` and forces a final
+      answer with ``tool_choice="none"``. Citation numbers stay continuous
+      across tool results. Returns ``tool_steps`` describing each call.
+
+    Returns ``{success, answer, citations, cited, invalid_citations, model,
+    usage, grounded, tool_steps, error?}``. Never raises: transport and API
+    failures come back as ``success=False`` with a human-readable ``error``,
+    matching :func:`uir_pipeline.fireworks_vision.describe_image`.
     """
-    if not contexts:
-        # Short-circuit: with nothing retrieved there is nothing to ground
-        # against, and asking the model anyway invites a hallucinated
-        # answer that *looks* sourced.
+    # Short-circuit: nothing retrieved AND nothing to search -> can't ground.
+    if not contexts and not docs:
         return {
             "success": True,
             "answer": "I can't answer that from the documents you've converted.",
@@ -297,6 +487,7 @@ def answer(
             "model": None,
             "usage": {},
             "grounded": False,
+            "tool_steps": [],
         }
 
     resolved_model = model or _get_chat_model()
@@ -307,104 +498,101 @@ def answer(
             "success": False,
             "error": str(exc),
             "answer": "",
-            "citations": [],
+            "citations": contexts,
             "model": resolved_model,
             "usage": {},
+            "tool_steps": [],
         }
     base_url = _get_base_url()
 
-    user_content = (
-        f"Context passages:\n\n{_format_context_block(contexts)}\n\n"
-        f"Question: {query}"
-    )
-
-    messages: list[dict[str, str]] = [{"role": "system", "content": _SYSTEM_PROMPT}]
     # Prior turns give the model pronoun/topic continuity. Truncated to the
     # last few so a long session can't push the grounding block out of the
     # context window -- the passages matter more than the backchat.
+    hist_msgs: list[dict[str, str]] = []
     for turn in (history or [])[-6:]:
         role = turn.get("role")
         content = (turn.get("content") or "").strip()
         if role in ("user", "assistant") and content:
-            messages.append({"role": role, "content": content[:4000]})
-    messages.append({"role": "user", "content": user_content})
+            hist_msgs.append({"role": role, "content": content[:4000]})
 
-    request_body = {
-        "model": resolved_model,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-    }
+    if not docs:
+        # ---- single-shot (existing behaviour) ------------------------------
+        user_content = (
+            f"Context passages:\n\n{_format_context_block(contexts)}\n\n"
+            f"Question: {query}"
+        )
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": _SYSTEM_PROMPT}, *hist_msgs,
+            {"role": "user", "content": user_content},
+        ]
+        logger.info("fireworks chat call: model=%s contexts=%d query=%r",
+                    resolved_model, len(contexts), query[:80])
+        try:
+            msg, usage = _complete(messages, model=resolved_model, api_key=api_key,
+                                   base_url=base_url, max_tokens=max_tokens,
+                                   temperature=temperature)
+        except Exception as exc:  # noqa: BLE001 -- fail-soft
+            return _model_failure(exc, contexts, resolved_model, [])
+        return _finalize(msg.get("content", ""), contexts, [], resolved_model, usage)
 
-    logger.info(
-        "fireworks chat call: model=%s contexts=%d query=%r",
-        resolved_model, len(contexts), query[:80],
+    # ---- agentic tool-calling loop -----------------------------------------
+    gathered = list(contexts)
+    tool_steps: list[dict[str, Any]] = []
+    initial_block = _format_context_block(gathered) if gathered else "(no initial passages)"
+    user_content = (
+        f"Context passages:\n\n{initial_block}\n\nQuestion: {query}\n\n"
+        "If the passages above are insufficient, call `search` or "
+        "`get_more_sources` to find more before answering. Cite every claim "
+        "as [n] using the passage numbers above and in tool results."
     )
+    messages = [
+        {"role": "system", "content": _SYSTEM_PROMPT_TOOLS}, *hist_msgs,
+        {"role": "user", "content": user_content},
+    ]
+    logger.info("fireworks agent call: model=%s contexts=%d docs=%d query=%r",
+                resolved_model, len(gathered), len(docs), query[:80])
 
     try:
-        import requests as _requests
-
-        response = _requests.post(
-            f"{base_url}/chat/completions",
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-            json=request_body,
-            timeout=90,
-        )
-        response.raise_for_status()
-        data = response.json()
-
-        choices = data.get("choices") or []
-        if not choices:
-            return {
-                "success": False,
-                "error": "empty choices in Fireworks API response",
-                "answer": "",
-                "citations": contexts,
-                "model": resolved_model,
-                "usage": {},
-            }
-
-        reply = choices[0].get("message", {}).get("content", "") or ""
-        usage = data.get("usage", {})
-        logger.info("fireworks chat response: model=%s tokens=%s", resolved_model, usage)
-
-        reply, invalid = _validate_citations(reply.strip(), len(contexts))
-        if invalid:
-            logger.warning(
-                "chat model cited %d passage(s) that were never supplied "
-                "(%s; only %d given); markers stripped from the answer",
-                len(invalid), invalid, len(contexts),
-            )
-
-        return {
-            "success": True,
-            "answer": reply,
-            "citations": contexts,
-            "cited": _cited_indices(reply, len(contexts)),
-            "invalid_citations": invalid,
-            "model": resolved_model,
-            "usage": usage,
-            "grounded": True,
-        }
-
-    except Exception as exc:  # noqa: BLE001 -- fail-soft, mirrors fireworks_vision
-        # Surface the status line but not the raw body: Fireworks echoes the
-        # request on some 4xx, and the request contains document text.
-        status = getattr(getattr(exc, "response", None), "status_code", None)
-        detail = f"HTTP {status}" if status else f"{type(exc).__name__}: {exc}"
-        logger.exception("fireworks chat call failed")
-        return {
-            "success": False,
-            "error": f"Chat model call failed ({detail}).",
-            "answer": "",
-            "citations": contexts,
-            "model": resolved_model,
-            "usage": {},
-        }
+        for _ in range(max_iterations):
+            msg, usage = _complete(messages, model=resolved_model, api_key=api_key,
+                                   base_url=base_url, max_tokens=max_tokens,
+                                   temperature=temperature, tools=_TOOLS,
+                                   tool_choice="auto")
+            tool_calls = msg.get("tool_calls")
+            if not tool_calls:
+                return _finalize(msg.get("content", ""), gathered, tool_steps,
+                                 resolved_model, usage)
+            # The assistant turn that requested tools must be echoed back with
+            # the tool_calls intact, then each tool result follows.
+            messages.append(msg)
+            for tc in tool_calls:
+                fn = tc.get("function") or {}
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except Exception:  # noqa: BLE001 -- malformed args -> empty
+                    args = {}
+                results = _run_tool(fn.get("name"), args, docs, query)
+                start = len(gathered) + 1
+                gathered.extend(results)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.get("id"),
+                    "content": _format_context_block(results, start=start),
+                })
+                tool_steps.append({
+                    "tool": fn.get("name"),
+                    "query": (args.get("query") or ""),
+                    "n_results": len(results),
+                })
+        # Iteration cap: force a final answer instead of looping further.
+        msg, usage = _complete(messages, model=resolved_model, api_key=api_key,
+                               base_url=base_url, max_tokens=max_tokens,
+                               temperature=temperature, tools=_TOOLS,
+                               tool_choice="none")
+        return _finalize(msg.get("content", ""), gathered, tool_steps,
+                         resolved_model, usage)
+    except Exception as exc:  # noqa: BLE001 -- fail-soft
+        return _model_failure(exc, gathered, resolved_model, tool_steps)
 
 
 __all__ = [

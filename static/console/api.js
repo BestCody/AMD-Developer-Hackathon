@@ -56,19 +56,40 @@
 
   // -- pipeline -------------------------------------------------------------
 
-  /** Upload a real File. Returns { job_id }. */
-  function run(file, intent) {
+  /** Upload a real File. Returns { job_id }.
+   *
+   * `folderId` (optional) lands the document in that folder; omit/null puts
+   * it at the "All files" root. `intent` is the optional reader-mode query.
+   */
+  function run(file, intent, folderId) {
     const fd = new FormData();
     fd.append("file", file);
     if (intent && intent.trim()) fd.append("intent", intent.trim());
+    if (folderId != null && folderId !== "") fd.append("folder", String(folderId));
     return request("/api/run", { method: "POST", body: fd });
   }
 
   const status = (jobId) => request(`/api/status/${encodeURIComponent(jobId)}`);
-  const listJobs = () => request("/api/jobs");
+  const listJobs = (folderId) => {
+    const qs = folderId === undefined ? "" : `?folder_id=${folderId == null ? "" : encodeURIComponent(folderId)}`;
+    return request(`/api/jobs${qs}`);
+  };
   const result = (jobId) => request(`/api/result/${encodeURIComponent(jobId)}`);
   const umr = (jobId) => request(`/api/umr/${encodeURIComponent(jobId)}`);
   const downloadUrl = (jobId) => `/api/download/${encodeURIComponent(jobId)}`;
+  const thumbUrl = (jobId) => `/api/thumb/${encodeURIComponent(jobId)}`;
+
+  // -- folders / library -------------------------------------------------
+
+  const listFolders = () => request("/api/folders");
+  const createFolder = (name) => request("/api/folders", { method: "POST", body: { name } });
+  const renameFolder = (id, name) => request(`/api/folders/${encodeURIComponent(id)}`, { method: "PATCH", body: { name } });
+  const deleteFolder = (id) => request(`/api/folders/${encodeURIComponent(id)}`, { method: "DELETE" });
+  /** Move a job into a folder (folderId) or to the root (null). */
+  const moveJob = (jobId, folderId) =>
+    request(`/api/jobs/${encodeURIComponent(jobId)}`, { method: "PATCH", body: { folder_id: folderId } });
+  /** Permanently delete a job and its on-disk artefacts. */
+  const deleteJob = (jobId) => request(`/api/jobs/${encodeURIComponent(jobId)}`, { method: "DELETE" });
 
   /**
    * Poll /api/status until the job leaves the running set.
@@ -98,9 +119,16 @@
 
   // -- chat -----------------------------------------------------------------
 
-  /** Ask a grounded question. `history` is [{role, content}, ...]. */
+  /** Ask a grounded question. `history` is [{role, content}, ...].
+   *  The agent may call tools (search/get_more_sources); the response includes
+   *  `tool_steps` describing each call. */
   const chat = (message, history, jobIds) =>
     request("/api/chat", { method: "POST", body: { message, history: history || [], job_ids: jobIds } });
+
+  /** Semantic + title-priority passage search across the caller's documents.
+   *  Returns { results: [{job_id, doc_title, page, text, score, title_match}] }. */
+  const search = (query, jobIds) =>
+    request("/api/search", { method: "POST", body: { query, job_ids: jobIds } });
 
   // -- conversations (Chats panel) ------------------------------------------
 
@@ -113,20 +141,26 @@
   const conversationMessages = (cid) =>
     request(`/api/conversations/${encodeURIComponent(cid)}/messages`);
   /**
-   * Post a message to a thread. If `text` starts with "gemini:", the server
+   * Post a message to a thread. If `text` starts with "@fireworks", the server
    * answers the remainder from the user's documents. Returns
    * { user_message, reply } -- reply is null for a plain note.
    */
   const sendConversationMessage = (cid, text) =>
     request(`/api/conversations/${encodeURIComponent(cid)}/messages`, { method: "POST", body: { text } });
 
+  /** Autocomplete: registered users whose email starts with `prefix`. */
+  const searchUsers = (prefix) =>
+    request(`/api/users/search?q=${encodeURIComponent(prefix)}`);
+
   window.MonadLabsAPI = {
     ApiError,
     isUnauthorized,
     me, login, signup, logout,
-    run, status, listJobs, result, umr, downloadUrl, pollUntilSettled,
-    chat,
+    run, status, listJobs, result, umr, downloadUrl, thumbUrl, pollUntilSettled,
+    listFolders, createFolder, renameFolder, deleteFolder,
+    moveJob, deleteJob,
+    chat, search,
     listConversations, createConversation, deleteConversation,
-    conversationMessages, sendConversationMessage,
+    conversationMessages, sendConversationMessage, searchUsers,
   };
 })();

@@ -288,6 +288,28 @@ class UserStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def get_by_email(self, email: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id, email, name FROM users WHERE email = ?",
+                (normalize_email(email),)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def search_by_email(self, prefix: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Return users whose email starts with the given prefix (case-insensitive).
+
+        The prefix is first normalised (strip + lowercased), and the result is
+        bounded by ``limit`` so the autocomplete never enumerates the whole table.
+        """
+        q = normalize_email(prefix) + "%"
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, email, name FROM users WHERE email LIKE ? ORDER BY email LIMIT ?",
+                (q, max(1, int(limit))),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def verify_user(self, email: str, password: str, *, ip: str = "-") -> dict[str, Any]:
         """Return the user dict, or raise :class:`AuthError`.
 

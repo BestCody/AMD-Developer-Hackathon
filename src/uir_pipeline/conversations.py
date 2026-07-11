@@ -5,7 +5,7 @@ start one by entering someone's address (they need not have an account yet --
 they see the thread the moment they sign up with that email). Both members
 see the same messages.
 
-Within a thread, a message that starts with ``gemini:`` is a command: the
+Within a thread, a message that starts with ``@fireworks`` is a command: the
 console answers its remainder from the *sender's* own converted documents and
 posts the reply into the shared thread, so both members see the question and
 the grounded answer. Anything else is an ordinary message between the two
@@ -18,7 +18,7 @@ user can only ever see or post to threads they are part of. Storage mirrors
 WAL, and ``ON DELETE CASCADE`` so leaving the last seat drops the thread.
 
 This module stores and retrieves; it never calls a model. The web layer owns
-the ``gemini:`` routing and the retrieval/answer step.
+the ``@fireworks`` routing and the retrieval/answer step.
 """
 from __future__ import annotations
 
@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
     content         TEXT NOT NULL,
     citations       TEXT,
     grounded        INTEGER,
+    tool_steps      TEXT,
     created_at      REAL NOT NULL,
     FOREIGN KEY (conversation_id) REFERENCES conversations (id) ON DELETE CASCADE
 );
@@ -94,6 +95,19 @@ class ConversationStore:
             conn.execute("PRAGMA journal_mode=WAL")
             self._migrate_legacy(conn)
             conn.executescript(_SCHEMA)
+            self._migrate_add_tool_steps(conn)
+
+    @staticmethod
+    def _migrate_add_tool_steps(conn: sqlite3.Connection) -> None:
+        """Add the ``tool_steps`` column to pre-existing conversation_messages.
+
+        Fresh databases get the column from ``_SCHEMA``; databases created
+        before the agent tool-calling feature need an ``ALTER TABLE``. The
+        column is nullable, so old rows simply read as ``tool_steps = []``.
+        """
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(conversation_messages)")}
+        if "tool_steps" not in cols:
+            conn.execute("ALTER TABLE conversation_messages ADD COLUMN tool_steps TEXT")
 
     @staticmethod
     def _migrate_legacy(conn: sqlite3.Connection) -> None:
@@ -255,7 +269,7 @@ class ConversationStore:
     def list_messages(self, conversation_id: int) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT id, sender_email, role, content, citations, grounded, created_at "
+                "SELECT id, sender_email, role, content, citations, grounded, tool_steps, created_at "
                 "FROM conversation_messages WHERE conversation_id = ? ORDER BY id",
                 (int(conversation_id),),
             ).fetchall()
@@ -270,12 +284,14 @@ class ConversationStore:
         sender_email: str | None = None,
         citations: list[dict[str, Any]] | None = None,
         grounded: bool | None = None,
+        tool_steps: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Append a message and bump the thread's ``updated_at``.
 
         ``sender_email`` is the author for a ``user`` message and ``None`` for
-        an ``assistant`` (gemini) reply. Raises ``ValueError`` on a bad role or
-        a ``user`` message with no sender.
+        an ``assistant`` (fireworks) reply. ``tool_steps`` records the agent's
+        tool calls for a fireworks reply (``None`` for ordinary notes). Raises
+        ``ValueError`` on a bad role or a ``user`` message with no sender.
         """
         if role not in _VALID_ROLES:
             raise ValueError(f"role must be one of {sorted(_VALID_ROLES)}, got {role!r}")
@@ -285,13 +301,14 @@ class ConversationStore:
         content = (content or "")[:MAX_MESSAGE_LEN]
         now = time.time()
         cites_json = json.dumps(citations) if citations else None
+        steps_json = json.dumps(tool_steps) if tool_steps else None
         grounded_int = None if grounded is None else int(bool(grounded))
         with self._connect() as conn:
             cur = conn.execute(
                 "INSERT INTO conversation_messages "
-                "(conversation_id, sender_email, role, content, citations, grounded, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (int(conversation_id), sender, role, content, cites_json, grounded_int, now),
+                "(conversation_id, sender_email, role, content, citations, grounded, tool_steps, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (int(conversation_id), sender, role, content, cites_json, grounded_int, steps_json, now),
             )
             conn.execute(
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
@@ -305,6 +322,7 @@ class ConversationStore:
             "content": content,
             "citations": citations or [],
             "grounded": grounded,
+            "tool_steps": tool_steps or [],
             "created_at": now,
         }
 
@@ -339,6 +357,7 @@ class ConversationStore:
             "content": r["content"],
             "citations": json.loads(r["citations"]) if r["citations"] else [],
             "grounded": None if r["grounded"] is None else bool(r["grounded"]),
+            "tool_steps": json.loads(r["tool_steps"]) if r["tool_steps"] else [],
             "created_at": r["created_at"],
         }
 

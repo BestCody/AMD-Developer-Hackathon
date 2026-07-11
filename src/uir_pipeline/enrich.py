@@ -14,6 +14,7 @@ import logging
 import threading
 from collections import Counter
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, Final
 
 logger = logging.getLogger(__name__)
@@ -59,8 +60,42 @@ _NLP_LOCK = threading.Lock()
 DEFAULT_SPACY_MODEL: Final[str] = "en_core_web_sm"
 
 
+class _DummyNLP:
+    """No-op stand-in for a :class:`spacy.language.Language` when the model
+    is unavailable.
+
+    Surface area intentionally minimal: :func:`enrich_chunks` only reads
+    ``doc.ents``, so ``__call__(text)`` returns a plain object with an
+    empty ``ents`` tuple. Every downstream consumer
+    (chunks / UIR / UMR / grounded chat retrieval) treats the
+    entity and relationship lists in :class:`EnrichmentResult` as additive
+    metadata, so a model-down :class:`_DummyNLP` lets the whole job
+    succeed with zero NER hits instead of aborting at
+    ``spacy.load(model_id)``. Mirrors the best-effort enrichment pattern
+    in :mod:`uir_pipeline.caption`.
+    """
+
+    # Cached at module-import time -- one allocation for the entire process
+    # is enough; every call returns the same empty doc. Callers only
+    # iterate ``ents``, so the doc stays effectively immutable in practice;
+    # assertion follows up with ``is`` to verify the cache hit.
+    _EMPTY_DOC = SimpleNamespace(ents=())
+
+    def __call__(self, text: str) -> Any:
+        return self._EMPTY_DOC
+
+
 def _get_nlp(model_id: str = DEFAULT_SPACY_MODEL):
-    """Return the cached :class:`spacy.language.Language` for ``model_id``."""
+    """Return the cached :class:`spacy.language.Language` for ``model_id``.
+
+    If the requested model is not installed (``spacy.load`` raises
+    ``OSError [E050]`` -- this happens when ``python -m spacy download
+    <model>`` was skipped), substitute :class:`_DummyNLP` and emit a
+    single WARNING. The job still completes; only NER hits are lost.
+    Cached alongside a real pipeline under ``_NLP_CACHE`` so the warning
+    fires exactly once per process (matching the lock-guarded cache
+    pattern below).
+    """
     cached = _NLP_CACHE.get(model_id)
     if cached is not None:
         return cached
@@ -70,7 +105,20 @@ def _get_nlp(model_id: str = DEFAULT_SPACY_MODEL):
             return cached
         import spacy  # lazy
         logger.debug("loading spaCy pipeline %s (first use; cached after)", model_id)
-        nlp = spacy.load(model_id)
+        try:
+            nlp = spacy.load(model_id)
+        except OSError as exc:
+            # spaCy raises ``OSError`` with ``[E050]`` for the missing-model
+            # case (also covers ``[E104]`` for broken packages and ``[E097]``
+            # for invalid model arg). Specific on purpose, not
+            # ``Exception`` -- a real bug in this code path should still
+            # propagate so the worker crash-isolation path can flag it.
+            logger.warning(
+                "spaCy model %r not found; NER enrichment will be empty. "
+                "Run `python -m spacy download %s` to fix. (Underlying: %s)",
+                model_id, model_id, exc,
+            )
+            nlp = _DummyNLP()
         _NLP_CACHE[model_id] = nlp
         return nlp
 
