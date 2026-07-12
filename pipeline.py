@@ -36,7 +36,7 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Input file (or directory). Single file accepts any supported "
             "format (PDF/DOCX/PPTX/XLSX/HTML/EPUB/LaTeX/IPYNB/RTF/TXT/MD/"
-            "CSV/image/audio/code); a directory is rglobbed for "
+            "CSV/image/audio/video/code); a directory is rglobbed for "
             "src/uir_pipeline/format_router::SUPPORTED_EXTENSIONS."
         ),
     )

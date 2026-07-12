@@ -541,7 +541,8 @@
       "enum": [
         "document",
         "image",
-        "audio"
+        "audio",
+        "video"
       ],
       "title": "Modal Type",
       "type": "string"

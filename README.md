@@ -38,6 +38,13 @@ boundary, enriched with NER, and embedded with BGE-small just like document
 chunks. The resulting transcript includes per-chunk speaker labels and timestamps
 in the UMR Markdown companion.
 
+Video files are processed by extracting the audio track (transcribed via Whisper),
+sampling frames at adaptive intervals, and captioning each frame with Florence-2.
+Audio transcripts and visual descriptions are fused into time-aligned chunks, so
+each chunk contains both what was said and what was seen in that time window.
+This avoids the heavy memory requirements of dedicated video VLMs (18+ GB for
+Qwen-Omni-3B) by reusing the existing audio and image pipelines.
+
 ## Browser console
 
 The console is a single-page application with three tabs and a global
@@ -96,8 +103,8 @@ The interface is displayed at 75% scale to match the Aperture console design.
 - Tesseract only when OCR fallback is needed
 - A Fireworks API key for image conversion and assistant responses
 - **ffmpeg** on PATH for audio metadata extraction (pydub uses it for
-  non-WAV formats)
-- **vLLM** is Linux/CUDA only; on macOS the audio pipeline falls back to
+  non-WAV formats) and video frame sampling
+- **vLLM** is Linux/CUDA only; on macOS the audio and video pipelines fall back to
   HuggingFace Transformers for Whisper inference
 
 Docling and PyTorch can consume significant memory. On an 8 GB computer,
@@ -202,6 +209,7 @@ doc_<id>.umr.md
 | Text | `.txt`, `.md`, `.csv`, `.tsv`, `.rtf`, `.ipynb`, source files | Direct extraction |
 | Image | `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.bmp`, `.tif`, `.tiff` | Fireworks vision |
 | Audio | `.mp3`, `.wav`, `.m4a`, `.flac`, `.ogg`, `.aac`, `.wma` | vLLM Whisper + pyannote diarization |
+| Video | `.mp4`, `.avi`, `.mov`, `.webm`, `.mkv`, `.flv`, `.wmv`, `.m4v` | ffmpeg audio + frame sampling + Whisper + Florence-2 |
 
 Legacy `.doc`, `.ppt`, and `.xls` files are recognized but rejected because
 they are not safely convertible by the current routes.
@@ -212,6 +220,12 @@ but the conversion job fails when the vision stage starts.
 Audio uploads require vLLM (Linux) or Transformers (macOS fallback). Speaker
 diarization is optional and falls back to "UNKNOWN" labels if pyannote.audio is
 not installed or fails to load.
+
+Video uploads require `ffmpeg` on PATH (same as audio). The video pipeline extracts
+the audio track for Whisper transcription, samples frames at adaptive intervals,
+and captions each frame with Florence-2. This is lightweight compared to dedicated
+video VLMs: zero new model loads, ~4 GB total GPU for Whisper + Florence-2 on a
+short video. On macOS, Whisper runs via Transformers and Florence-2 via MPS.
 
 ## Weaviate
 
@@ -256,6 +270,7 @@ container.
 | `docling_extract.py` | Wraps Docling and validates complete conversion |
 | `image_pipeline.py` | Converts images through Fireworks vision |
 | `audio_pipeline.py` | Transcribes audio via vLLM Whisper + pyannote diarization |
+| `video_pipeline.py` | Extracts audio + samples frames from video; fuses Whisper transcripts with Florence-2 captions into time-aligned chunks |
 | `chunk.py` | Produces token-sized document chunks |
 | `enrich.py` | Adds entities and relationships |
 | `embed.py` | Creates BGE-small embeddings |

@@ -54,6 +54,7 @@ class FormatRoute(str, Enum):
     TEXT = "text"
     IMAGE = "image"
     AUDIO = "audio"
+    VIDEO = "video"
     SKIP = "skip"
 
 
@@ -134,6 +135,12 @@ _AUDIO_EXTENSIONS: Final[frozenset[str]] = frozenset({
     ".flac", ".ogg", ".aac", ".wma",
 })
 
+# Video formats -- routed through ffmpeg audio extraction + frame sampling + Whisper + Florence-2.
+_VIDEO_EXTENSIONS: Final[frozenset[str]] = frozenset({
+    ".mp4", ".avi", ".mov",
+    ".webm", ".mkv", ".flv", ".wmv", ".m4v",
+})
+
 
 # ----------------------------------------------------------------------------
 # Detection
@@ -170,6 +177,8 @@ def detect_format(path: str | Path) -> str:
         return "IMAGE"
     if ext in _AUDIO_EXTENSIONS:
         return "AUDIO"
+    if ext in _VIDEO_EXTENSIONS:
+        return "VIDEO"
     if ext in _DOCLING_EXTENSIONS:
         return _detect_zip_subtype(p) if ext in {".docx", ".pptx", ".xlsx", ".epub"} \
             else ext.lstrip(".").upper()
@@ -248,6 +257,8 @@ def classify_route(format_str: str) -> FormatRoute:
         return FormatRoute.IMAGE
     if fs == "AUDIO" or fs in {e.lstrip(".").upper() for e in _AUDIO_EXTENSIONS}:
         return FormatRoute.AUDIO
+    if fs == "VIDEO" or fs in {e.lstrip(".").upper() for e in _VIDEO_EXTENSIONS}:
+        return FormatRoute.VIDEO
     if fs in {e.lstrip(".").upper() for e in _TEXT_EXTENSIONS}:
         return FormatRoute.TEXT
     return FormatRoute.SKIP
@@ -295,6 +306,7 @@ SUPPORTED_EXTENSIONS: Final[frozenset[str]] = frozenset({
     *_TEXT_EXTENSIONS,
     *_IMAGE_EXTENSIONS,
     *_AUDIO_EXTENSIONS,
+    *_VIDEO_EXTENSIONS,
 })
 
 #: Extensions the orchestrator can actually convert.

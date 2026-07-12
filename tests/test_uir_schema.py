@@ -166,9 +166,14 @@ def test_wrong_uir_version_rejected(spec_example_dict):
 
 
 def test_wrong_modal_type_rejected(spec_example_dict):
-    spec_example_dict["modal_type"] = "video"
+    spec_example_dict["modal_type"] = "invalid_type"
     with pytest.raises(ValidationError):
         UIRV1.model_validate_json(json.dumps(spec_example_dict))
+
+
+def test_video_modal_type_valid(spec_example_dict):
+    spec_example_dict["modal_type"] = "video"
+    UIRV1.model_validate_json(json.dumps(spec_example_dict))
 
 
 def test_bad_doc_node_id_prefix_rejected(spec_example_dict):

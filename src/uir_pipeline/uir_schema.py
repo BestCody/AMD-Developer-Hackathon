@@ -389,7 +389,7 @@ class UIRV1(BaseModel):
             "shape here to allow upstream UUID library upgrades."
         ),
     )
-    modal_type: Literal["document", "image", "audio"] = "document"
+    modal_type: Literal["document", "image", "audio", "video"] = "document"
     source: Source
     metadata: Metadata
     structure: Structure

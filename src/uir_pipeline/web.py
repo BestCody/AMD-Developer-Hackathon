@@ -467,6 +467,8 @@ class Job:
             "language_detected",
             "duration_seconds",
             "speaker_count",
+            "frame_count",
+            "frame_descriptions",
         )
         public_meta = {
             k: v for k, v in (self.stage_meta or {}).items()

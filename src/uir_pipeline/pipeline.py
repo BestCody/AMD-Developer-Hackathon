@@ -160,6 +160,15 @@ class AudioAnalysisError(RuntimeError):
     """
 
 
+class VideoAnalysisError(RuntimeError):
+    """The VIDEO route could not process the video file.
+
+    `run_video_pipeline` reports failure in `VideoPipelineResult.error` rather
+    than raising, so the orchestrator has to translate. Mirrors the same
+    pattern as `ImageAnalysisError` and `AudioAnalysisError`.
+    """
+
+
 class _NoFigureSource(Exception):
     """The chosen route produced no figure regions to caption.
 
@@ -557,6 +566,26 @@ def run(
             chunk_count=audio_result.chunk_count,
             entity_count=audio_result.entity_count,
             elapsed_seconds=audio_result.elapsed_seconds,
+        )
+
+    if froute is FormatRoute.VIDEO:
+        from uir_pipeline.video_pipeline import run_video_pipeline
+
+        video_result = run_video_pipeline(
+            p,
+            output_dir=output_dir,
+            dry_run=dry_run,
+            on_progress=on_progress,
+        )
+        if video_result.error:
+            raise VideoAnalysisError(video_result.error)
+        return PipelineResult(
+            uir_id=video_result.uir_id,
+            out_path=video_result.out_path,
+            umr_path=video_result.umr_path,
+            chunk_count=video_result.chunk_count,
+            entity_count=video_result.entity_count,
+            elapsed_seconds=video_result.elapsed_seconds,
         )
 
     from uir_pipeline.chunk import chunk_text
@@ -1177,6 +1206,7 @@ def run(
 __all__ = [
     "AudioAnalysisError",
     "ImageAnalysisError",
+    "VideoAnalysisError",
     "PipelineResult",
     "run",
 ]

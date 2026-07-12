@@ -255,6 +255,23 @@ def build_umr(
         if spk_count is not None:
             eyebrow_parts.append(f"speakers: {int(spk_count)}")
 
+    # Video-specific metadata eyebrow additions.
+    if modal_type == "video":
+        video_meta = (meta.get("modal_features") or {}).get("video") or {}
+        dur = video_meta.get("duration_seconds")
+        if dur is not None:
+            eyebrow_parts.append(f"duration: {float(dur):.1f}s")
+        width = video_meta.get("width")
+        height = video_meta.get("height")
+        if width and height:
+            eyebrow_parts.append(f"resolution: {width}x{height}")
+        fps = video_meta.get("fps")
+        if fps:
+            eyebrow_parts.append(f"fps: {fps:.2f}")
+        frame_count = video_meta.get("frame_count")
+        if frame_count is not None:
+            eyebrow_parts.append(f"frames sampled: {int(frame_count)}")
+
     if eyebrow_parts:
         lines.append("*" + " · ".join(eyebrow_parts) + "*")
         lines.append("")
@@ -426,7 +443,27 @@ def _render_chunk(chunk: dict[str, Any], lines: list[str]) -> None:
     mf = chunk.get("modal_features") or {}
     audio_seg = mf.get("audio_segment")
 
-    if audio_seg:
+    video_seg = mf.get("video_segment")
+    if video_seg:
+        # Video chunk rendering: time range + speaker + visual frames.
+        speaker = _coerce_str(video_seg.get("speaker"), default="UNKNOWN")
+        start = video_seg.get("start", 0)
+        end = video_seg.get("end", 0)
+        tokens = _coerce_int(chunk.get("token_count"), default=0)
+
+        start_fmt = f"{int(start) // 60}:{int(start) % 60:02d}"
+        end_fmt = f"{int(end) // 60}:{int(end) % 60:02d}"
+
+        lines.append(
+            f"> **{start_fmt} - {end_fmt} · {speaker} · {tokens} tok**"
+        )
+        for vf in video_seg.get("visual_frames", []):
+            vts = vf.get("timestamp", 0)
+            vdesc = vf.get("description", "")
+            v_mins = int(vts) // 60
+            v_secs = int(vts) % 60
+            lines.append(f"> [Visual {v_mins}:{v_secs:02d}] {vdesc}")
+    elif audio_seg:
         # Audio chunk rendering: speaker label + timestamp instead of page/bbox.
         speaker = _coerce_str(audio_seg.get("speaker"), default="UNKNOWN")
         start = audio_seg.get("start", 0)
