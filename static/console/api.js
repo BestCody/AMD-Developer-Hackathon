@@ -78,6 +78,7 @@
   const umr = (jobId) => request(`/api/umr/${encodeURIComponent(jobId)}`);
   const downloadUrl = (jobId) => `/api/download/${encodeURIComponent(jobId)}`;
   const thumbUrl = (jobId) => `/api/thumb/${encodeURIComponent(jobId)}`;
+  const originalUrl = (jobId) => `/api/original/${encodeURIComponent(jobId)}`;
 
   // -- folders / library -------------------------------------------------
 
@@ -156,7 +157,7 @@
     ApiError,
     isUnauthorized,
     me, login, signup, logout,
-    run, status, listJobs, result, umr, downloadUrl, thumbUrl, pollUntilSettled,
+    run, status, listJobs, result, umr, downloadUrl, thumbUrl, originalUrl, pollUntilSettled,
     listFolders, createFolder, renameFolder, deleteFolder,
     moveJob, deleteJob,
     chat, search,

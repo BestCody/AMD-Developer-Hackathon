@@ -498,7 +498,18 @@ def _render_chunk(chunk: dict[str, Any], lines: list[str]) -> None:
         )
     body = _sanitize_text(_coerce_str(chunk.get("text"), default=""))
     if body:
-        lines.append(body)
+        if video_seg and video_seg.get("visual_frames"):
+            # Strip inline visual descriptions from the body text to avoid
+            # duplication with the blockquote-annotated visual frames above.
+            audio_lines = [
+                ln for ln in body.splitlines()
+                if not ln.strip().startswith("[Visual ")
+            ]
+            audio_text = "\n".join(audio_lines).strip()
+            if audio_text:
+                lines.append(audio_text)
+        else:
+            lines.append(body)
     lines.append("")
 
 

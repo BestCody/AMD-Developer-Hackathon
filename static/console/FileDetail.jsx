@@ -42,6 +42,11 @@ const EXT_ICON = {
   epub: "book", html: "globe", htm: "globe",
   png: "image", jpg: "image", jpeg: "image", gif: "image",
   webp: "image", bmp: "image", tiff: "image", tif: "image",
+  mp4: "clapperboard", avi: "clapperboard", mov: "clapperboard",
+  webm: "clapperboard", mkv: "clapperboard", flv: "clapperboard",
+  wmv: "clapperboard", m4v: "clapperboard",
+  mp3: "music", wav: "music", m4a: "music",
+  flac: "music", ogg: "music", aac: "music", wma: "music",
   txt: "file-code", md: "file-code", py: "file-code", js: "file-code",
   jsx: "file-code", ts: "file-code", tsx: "file-code", json: "file-code",
   xml: "file-code", ipynb: "notebook-text",
@@ -61,31 +66,59 @@ function flattenChunks(node) {
   return (Array.isArray(children) ? children : []).flatMap(flattenChunks);
 }
 
-/** Big preview: rendered thumbnail with shadow-product, icon on error. */
+const _VIDEO_EXT = new Set(["mp4", "avi", "mov", "webm", "mkv", "flv", "wmv", "m4v"]);
+const _AUDIO_EXT = new Set(["mp3", "wav", "m4a", "flac", "ogg", "aac", "wma"]);
+
+function isVideo(name) { return _VIDEO_EXT.has(extOf(name)); }
+function isAudio(name) { return _AUDIO_EXT.has(extOf(name)); }
+
+/** Big preview: media player for video/audio, thumbnail for images/PDFs, icon on error. */
 function BigPreview({ job, name }) {
   const [broken, setBroken] = React.useState(false);
   const jobId = job && job.job_id;
   React.useEffect(() => { setBroken(false); }, [jobId]);
 
-  if (jobId && !broken) {
+  if (!jobId || broken) {
     return (
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center",
-        width: "100%", minHeight: 220, maxHeight: "46vh", padding: 16,
-        background: "var(--surface-parchment)", borderRadius: "var(--radius-lg)" }}>
-        <img
-          src={API.thumbUrl(jobId)} alt=""
-          onError={() => setBroken(true)}
-          style={{ maxWidth: "100%", maxHeight: "46vh", objectFit: "contain", borderRadius: "var(--radius-sm)", boxShadow: "var(--shadow-product)" }}
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+        gap: 10, width: "100%", minHeight: 220, maxHeight: "46vh", padding: 24,
+        background: "var(--surface-parchment)", borderRadius: "var(--radius-lg)", color: "var(--text-muted-48)" }}>
+        <window.LucideIcon name={iconFor(name)} size={64} />
+        <span style={{ fontSize: "var(--text-caption-size)" }}>No graphical preview for this file type</span>
+      </div>
+    );
+  }
+
+  if (isVideo(name)) {
+    return (
+      <div style={{ width: "100%", padding: 16, background: "var(--surface-parchment)", borderRadius: "var(--radius-lg)" }}>
+        <video
+          src={API.originalUrl(jobId)}
+          controls
+          style={{ width: "100%", maxHeight: "46vh", borderRadius: "var(--radius-sm)", boxShadow: "var(--shadow-product)" }}
+          poster={API.thumbUrl(jobId)}
         />
       </div>
     );
   }
+
+  if (isAudio(name)) {
+    return (
+      <div style={{ width: "100%", padding: 24, background: "var(--surface-parchment)", borderRadius: "var(--radius-lg)" }}>
+        <audio src={API.originalUrl(jobId)} controls style={{ width: "100%" }} />
+      </div>
+    );
+  }
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-      gap: 10, width: "100%", minHeight: 220, maxHeight: "46vh", padding: 24,
-      background: "var(--surface-parchment)", borderRadius: "var(--radius-lg)", color: "var(--text-muted-48)" }}>
-      <window.LucideIcon name={iconFor(name)} size={64} />
-      <span style={{ fontSize: "var(--text-caption-size)" }}>No graphical preview for this file type</span>
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center",
+      width: "100%", minHeight: 220, maxHeight: "46vh", padding: 16,
+      background: "var(--surface-parchment)", borderRadius: "var(--radius-lg)" }}>
+      <img
+        src={API.thumbUrl(jobId)} alt=""
+        onError={() => setBroken(true)}
+        style={{ maxWidth: "100%", maxHeight: "46vh", objectFit: "contain", borderRadius: "var(--radius-sm)", boxShadow: "var(--shadow-product)" }}
+      />
     </div>
   );
 }
@@ -153,16 +186,56 @@ function ChunksTab({ jobId }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10, fontFamily: "var(--font-text)" }}>
-      {chunks.map((c, i) => (
-        <div key={c.id || i} style={{ background: "var(--surface-parchment)", border: "1px solid var(--border-hairline)", borderRadius: "var(--radius-sm)", padding: "12px 14px" }}>
-          <div style={{ display: "flex", gap: 10, alignItems: "center", fontSize: "var(--text-micro-legal-size)", color: "var(--text-muted-48)", marginBottom: 6 }}>
-            <Badge kind="neutral">p. {c.page != null ? c.page : "?"}</Badge>
-            <span>{c.token_count != null ? `${c.token_count} tokens` : ""}</span>
-            {c.confidence != null && <span>· conf {Number(c.confidence).toFixed(2)}</span>}
+      {chunks.map((c, i) => {
+        const mf = c.modal_features || {};
+        const videoSeg = mf.video_segment || {};
+        const visualFrames = videoSeg.visual_frames || [];
+        const speaker = videoSeg.speaker;
+        const start = videoSeg.start;
+        const end = videoSeg.end;
+        const hasVideo = visualFrames.length > 0 || (start != null && end != null);
+        const hasAudio = c.text && !hasVideo; // crude heuristic: video chunks have visual frames
+
+        return (
+          <div key={c.id || i} style={{ background: "var(--surface-parchment)", border: "1px solid var(--border-hairline)", borderRadius: "var(--radius-sm)", padding: "12px 14px" }}>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", fontSize: "var(--text-micro-legal-size)", color: "var(--text-muted-48)", marginBottom: 6 }}>
+              <Badge kind="neutral">p. {c.page != null ? c.page : "?"}</Badge>
+              <span>{c.token_count != null ? `${c.token_count} tokens` : ""}</span>
+              {c.confidence != null && <span>· conf {Number(c.confidence).toFixed(2)}</span>}
+              {hasVideo && (
+                <span style={{ marginLeft: "auto", fontWeight: 600, color: "var(--accent-primary)" }}>
+                  {start != null && end != null ? `${Math.floor(start / 60)}:${Math.floor(start % 60).toString().padStart(2, "0")} - ${Math.floor(end / 60)}:${Math.floor(end % 60).toString().padStart(2, "0")}` : ""}
+                  {speaker && speaker !== "UNKNOWN" ? ` · ${speaker}` : ""}
+                </span>
+              )}
+            </div>
+
+            {/* Visual frames: rendered as distinct annotation blocks */}
+            {visualFrames.length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
+                {visualFrames.map((vf, j) => {
+                  const ts = vf.timestamp;
+                  const mins = Math.floor(ts / 60);
+                  const secs = Math.floor(ts % 60).toString().padStart(2, "0");
+                  return (
+                    <div key={j} style={{
+                      display: "flex", alignItems: "center", gap: 8,
+                      padding: "6px 10px", background: "var(--blue-50)", borderRadius: "var(--radius-xs)",
+                      fontSize: "var(--text-caption-size)", color: "var(--text-ink)",
+                    }}>
+                      <window.LucideIcon name="clapperboard" size={14} style={{ color: "var(--accent-primary)", flexShrink: 0 }} />
+                      <span style={{ fontWeight: 600, color: "var(--accent-primary)", flexShrink: 0 }}>{mins}:{secs}</span>
+                      <span>{vf.description}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            <pre style={{ ...PRE_STYLE, background: "var(--surface-canvas)", color: "var(--text-ink)", border: "1px solid var(--border-hairline)", maxHeight: 180 }}>{c.text}</pre>
           </div>
-          <pre style={{ ...PRE_STYLE, background: "var(--surface-canvas)", color: "var(--text-ink)", border: "1px solid var(--border-hairline)", maxHeight: 180 }}>{c.text}</pre>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

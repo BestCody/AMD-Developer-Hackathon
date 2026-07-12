@@ -303,9 +303,17 @@ def _caption_frames(
                 generated_ids, skip_special_tokens=False
             )[0]
             # Post-process: remove the prompt prefix if present
-            description = processor.post_process_generation(
-                description, task=DEFAULT_PROMPT, image_size=(img.width, img.height)
-            ).get(DEFAULT_PROMPT, description)
+            try:
+                parsed = processor.post_process_generation(
+                    description, task=DEFAULT_PROMPT, image_size=(img.width, img.height)
+                )
+                if isinstance(parsed, dict):
+                    description = parsed.get(DEFAULT_PROMPT, description)
+                else:
+                    description = str(parsed) if parsed is not None else description
+            except Exception as exc:
+                logger.debug("post_process_generation failed for frame %s: %s", fpath, exc)
+                # keep the raw description
 
             results.append({
                 "timestamp": frame["timestamp"],

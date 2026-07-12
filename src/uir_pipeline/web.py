@@ -50,6 +50,8 @@ import multiprocessing
 import os
 import queue
 import re
+import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -1092,9 +1094,9 @@ def create_app(
         """A non-text preview tile for a finished job's source file.
 
         Images are served verbatim (the original is the preview). PDFs render
-        page 1 to PNG via PyMuPDF. Everything else 404s so the front-end falls
-        back to a filetype icon. Cached for an hour -- the source file is
-        immutable once the job is done.
+        page 1 to PNG via PyMuPDF. Video files extract a frame via ffmpeg.
+        Everything else 404s so the front-end falls back to a filetype icon.
+        Cached for an hour -- the source file is immutable once the job is done.
         """
         with jobs_lock:
             job = _owned_job(job_id)
@@ -1129,7 +1131,65 @@ def create_app(
                 abort(404, description="thumbnail render failed")
             return Response(img, mimetype="image/png",
                             headers={"Cache-Control": "public, max-age=3600"})
+        _VIDEO_EXT = {
+            ".mp4", ".avi", ".mov", ".webm", ".mkv", ".flv", ".wmv", ".m4v",
+        }
+        if ext in _VIDEO_EXT:
+            try:
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    frame_path = Path(tmpdir) / "frame.png"
+                    result = subprocess.run(
+                        [
+                            "ffmpeg", "-y", "-i", str(upload_path),
+                            "-ss", "00:00:01", "-vframes", "1",
+                            "-q:v", "2", str(frame_path),
+                        ],
+                        capture_output=True, timeout=30,
+                    )
+                    if result.returncode != 0 or not frame_path.is_file():
+                        abort(404, description="video frame extraction failed")
+                    img = frame_path.read_bytes()
+                    return Response(img, mimetype="image/png",
+                                    headers={"Cache-Control": "public, max-age=3600"})
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("video thumb failed for job %s: %s", job_id, exc)
+                abort(404, description="video thumbnail unavailable")
         abort(404, description="no thumbnail for this file type")
+
+    @app.get("/api/original/<job_id>")
+    @login_required
+    def api_original(job_id: str) -> ResponseReturnValue:
+        """Serve the original uploaded file for media playback.
+
+        Video and audio files need their original bytes for <video>/<audio>
+        playback in the browser. Returns the source file with a detected MIME type.
+        """
+        with jobs_lock:
+            job = _owned_job(job_id)
+            if job.status != JOB_DONE:
+                abort(409, description="job not done yet")
+            upload_path = job.upload_path
+        if upload_path is None or not Path(upload_path).is_file():
+            abort(404, description="source file not found")
+        ext = Path(upload_path).suffix.lower()
+        _MIME = {
+            ".mp4": "video/mp4", ".avi": "video/x-msvideo", ".mov": "video/quicktime",
+            ".webm": "video/webm", ".mkv": "video/x-matroska", ".flv": "video/x-flv",
+            ".wmv": "video/x-ms-wmv", ".m4v": "video/mp4",
+            ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4",
+            ".flac": "audio/flac", ".ogg": "audio/ogg", ".aac": "audio/aac",
+            ".wma": "audio/x-ms-wma",
+            ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+            ".tiff": "image/tiff", ".tif": "image/tiff",
+        }
+        mimetype = _MIME.get(ext) or "application/octet-stream"
+        return send_file(
+            upload_path,
+            mimetype=mimetype,
+            as_attachment=False,
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
 
     @app.post("/api/run")
     @login_required
