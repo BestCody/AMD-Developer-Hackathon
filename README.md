@@ -25,6 +25,7 @@ input file
    +-- images                            -> Fireworks vision
    +-- audio (MP3, WAV, M4A, FLAC, etc.) -> vLLM Whisper + pyannote diarization
    +-- email (.eml, .msg)               -> MIME / Outlook parser
+   +-- video (.mp4, .mov, etc.)          -> ffmpeg + Whisper + Florence-2 frame fusion
    |
    v
 typed regions -> chunks -> enrichment -> embeddings -> UIR JSON + UMR Markdown
@@ -123,6 +124,84 @@ DefaultCPUAllocator: not enough memory
 
 Closing memory-heavy applications can help, but a low-memory Docling mode or a
 lighter PDF fallback is the more reliable long-term solution.
+
+## Pipeline architecture decisions (why we built it this way)
+
+### The UIR contract: one schema, any modality
+
+We didn't want a separate pipeline per file type. Every input—PDF, image, audio, video, email—converges into the **same** UIR v1.0 schema:
+
+- A `StructureNode` tree (sections, figures, tables, chunks)
+- `ChunkNode` leaves with `{text, page, bounding_box, confidence, modal_features}`
+- `modal_features` is a free-form dict per modality: `vector` for embeddings, `audio_segment` for timestamps, `video` for frame captions, `email` for headers
+
+This means the **retrieval layer**, **enrichment layer**, and **agentic layer** are modality-agnostic. A video chunk and a PDF paragraph are scored the same way (BGE cosine + BM25-lite fallback).
+
+### Why Docling as the single backend
+
+We started with pdfplumber + a custom layout classifier, then replaced both with **IBM Docling** (MIT license). Docling emits pre-typed sections / tables / figures / math natively, so downstream chunks come out spatially-aware and column-correct instead of flattened prose. The previous pdfplumber path was retired because it couldn't preserve column structure on multi-column PDFs. We keep a single backend to reduce memory overhead and avoid silent divergence between test fixtures and production paths.
+
+### Why Florence-2 instead of a heavier vision model
+
+For images and video frames we use **microsoft/Florence-2-base** (~1.5 GB). The prompt is a single `<MORE_DETAILED_CAPTION>` tag, which is fast and produces deterministic, structured descriptions. We don't need a conversational VLM here; the caption becomes a `chunk.text` entry that flows through the same BGE embedding and NER pipeline as any document paragraph.
+
+### Video: fusion, not a monolithic VLM
+
+Dedicated video VLMs (e.g., Qwen-Omni-3B) require 18+ GB of GPU memory. We avoid that by **decomposing video into two pipelines we already have**:
+
+1. **Audio track** → Whisper → timestamped transcript segments (same pipeline as audio files)
+2. **Frame sampling** → adaptive intervals (5s for <60s, 10s for 60–300s, 30s for >300s, capped at 20 frames) → Florence-2 captions
+3. **Fusion** — each audio chunk is annotated with visual frame descriptions that fall within its time window, producing a `ChunkNode` that contains both *what was said* and *what was seen*.
+
+This reuses zero new model weights and peaks at ~4 GB GPU for Whisper + Florence-2 combined.
+
+### Why the agent is autonomous (no pre-fetched context)
+
+Most RAG systems embed the top-k passages into the prompt unconditionally. We deliberately removed that. The model is given the **document catalog** and two tools (`search`, `get_more_sources`) and must decide when to retrieve. This matches how a human researcher works: you don't dump 6 paragraphs on someone and ask them to answer; you let them search, then answer. The system prompt enforces the rule: *"No passages are pre-loaded for you."*
+
+If the user @mentions a file (`@report.pdf`), the backend parses the mention, resolves it to the job ID, and narrows the tool search space to only that document. The model never sees the full file content; it only receives the chunks it explicitly retrieves.
+
+### Why BGE-small + BM25-lite fallback
+
+We use **BAAI/bge-small-en-v1.5** (384-dim) for dense embeddings. It's small enough to run on CPU, fast to batch, and produces strong semantic similarity for document retrieval. When BGE is unavailable (e.g., a cold-start machine without the model cached), we fall back to a **BM25-lite** scorer that tokenizes the query and chunks, computes a simplified TF-IDF score, and still ranks by relevance. The fallback guarantees the pipeline never breaks even if the embedding stage fails.
+
+### Why SQLite instead of a document store for metadata
+
+Jobs, folders, conversations, and auth are stored in **SQLite** (with WAL mode enabled). This gives us:
+- Zero external dependencies for the core product
+- Instant persistence on every job state change (no async flush risk)
+- A single `.db` file that can be copied, inspected, or migrated
+- The in-memory job registry is rebuilt from the database on startup, so uploads survive server restarts
+
+Weaviate is optional and only used for the vector layer; all metadata stays in SQLite.
+
+## How the AI agent works
+
+### Retrieval pipeline
+
+When a user asks a question, the backend walks every `ChunkNode` across every UIR JSON the user owns:
+
+1. **Embed the query** with BGE-small (or tokenize for BM25-lite)
+2. **Score every chunk** by cosine similarity (or text score)
+3. **Title boost** — if the document title matches a query token, every passage in that document gets `+0.30` (this lifts title matches above content-only matches without breaking intra-document ordering)
+4. **Floor filter** — chunks below `0.58` cosine are dropped (measured on a 267-chunk corpus; 0.58 sits below the worst answer-bearing chunk and above every off-topic query)
+5. **Return top-k** (default 6 for chat, 8 for search) sorted best-first
+
+### Agentic tool-calling loop
+
+The Fireworks chat model (MiniMax-M3) receives a system prompt that teaches it to ground every claim in a `[n]` citation and to call tools when it needs more context. The loop works like this:
+
+1. **Initial state** — user question + document catalog (no passages)
+2. **Model decides** — if it needs evidence, it calls `search(query)` or `get_more_sources(query)`
+3. **Tool executes** — the backend runs the retrieval pipeline above, appends the results to the conversation with continuous citation numbers, and returns control to the model
+4. **Repeat** — up to 4 tool-call iterations; after the cap, `tool_choice="none"` forces a final answer
+5. **Citation validation** — the backend strips any `[n]` markers that point at passages never supplied, so hallucinated citations are removed before the user sees them
+
+### Why this beats "dump top-k into the prompt"
+
+- **Token efficiency** — the model only pays for passages it actually needs, not 6 irrelevant chunks
+- **Multi-hop reasoning** — the model can search for "revenue", then search for "Q3" after reading the first result, mimicking how a human would investigate
+- **Citation honesty** — every claim is checked against the passages that were actually provided; hallucinated `[7]` when only 3 passages were given is stripped automatically
 
 ## Setup
 
