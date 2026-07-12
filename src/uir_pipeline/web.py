@@ -463,6 +463,10 @@ class Job:
             "dropped_relations",
             "entity_count",
             "relationship_count",
+            "transcription_length",
+            "language_detected",
+            "duration_seconds",
+            "speaker_count",
         )
         public_meta = {
             k: v for k, v in (self.stage_meta or {}).items()

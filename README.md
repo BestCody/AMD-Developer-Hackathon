@@ -1,6 +1,6 @@
 # MonadLabs UIR Pipeline
 
-MonadLabs converts documents, images, and text into a Universal Intermediate
+MonadLabs converts documents, images, audio, and text into a Universal Intermediate
 Representation (UIR v1.0). The output contains structured chunks, source
 metadata, optional embeddings, and a readable UMR Markdown companion file.
 
@@ -23,6 +23,7 @@ input file
    +-- PPTX                              -> python-pptx
    +-- text, Markdown, CSV, source code -> direct text extraction
    +-- images                            -> Fireworks vision
+   +-- audio (MP3, WAV, M4A, FLAC, etc.) -> vLLM Whisper + pyannote diarization
    |
    v
 typed regions -> chunks -> enrichment -> embeddings -> UIR JSON + UMR Markdown
@@ -30,6 +31,12 @@ typed regions -> chunks -> enrichment -> embeddings -> UIR JSON + UMR Markdown
 
 PDFs use Docling with the `pypdfium2` backend. Born-digital PDFs first run
 without OCR. Scanned PDFs can be retried with OCR when `DOCLING_OCR=auto`.
+
+Audio files are transcribed with vLLM-served Whisper (openai/whisper-small by
+default), optionally speaker-diarized with pyannote.audio, chunked by utterance
+boundary, enriched with NER, and embedded with BGE-small just like document
+chunks. The resulting transcript includes per-chunk speaker labels and timestamps
+in the UMR Markdown companion.
 
 ## Browser console
 
@@ -88,6 +95,10 @@ The interface is displayed at 75% scale to match the Aperture console design.
 - Docker Desktop only if using Weaviate
 - Tesseract only when OCR fallback is needed
 - A Fireworks API key for image conversion and assistant responses
+- **ffmpeg** on PATH for audio metadata extraction (pydub uses it for
+  non-WAV formats)
+- **vLLM** is Linux/CUDA only; on macOS the audio pipeline falls back to
+  HuggingFace Transformers for Whisper inference
 
 Docling and PyTorch can consume significant memory. On an 8 GB computer,
 conversion may fail while loading the table model if other applications leave
@@ -190,12 +201,17 @@ doc_<id>.umr.md
 | Presentation | `.pptx` | `python-pptx` |
 | Text | `.txt`, `.md`, `.csv`, `.tsv`, `.rtf`, `.ipynb`, source files | Direct extraction |
 | Image | `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.bmp`, `.tif`, `.tiff` | Fireworks vision |
+| Audio | `.mp3`, `.wav`, `.m4a`, `.flac`, `.ogg`, `.aac`, `.wma` | vLLM Whisper + pyannote diarization |
 
 Legacy `.doc`, `.ppt`, and `.xls` files are recognized but rejected because
 they are not safely convertible by the current routes.
 
 Image uploads require `FIREWORKS_API_KEY`. Without it, the upload is accepted
 but the conversion job fails when the vision stage starts.
+
+Audio uploads require vLLM (Linux) or Transformers (macOS fallback). Speaker
+diarization is optional and falls back to "UNKNOWN" labels if pyannote.audio is
+not installed or fails to load.
 
 ## Weaviate
 
@@ -239,6 +255,7 @@ container.
 | `format_router.py` | Selects the extraction route for each input |
 | `docling_extract.py` | Wraps Docling and validates complete conversion |
 | `image_pipeline.py` | Converts images through Fireworks vision |
+| `audio_pipeline.py` | Transcribes audio via vLLM Whisper + pyannote diarization |
 | `chunk.py` | Produces token-sized document chunks |
 | `enrich.py` | Adds entities and relationships |
 | `embed.py` | Creates BGE-small embeddings |
@@ -268,6 +285,7 @@ Frontend files are under `static/console/`:
 | `IconRail.jsx` | Left navigation rail with Upload, Fireworks, Chats, Search |
 | `Markdown.jsx` | `marked` + `DOMPurify` renderer for chat answers |
 | `AuthScreens.jsx` | Sign-in and sign-up forms |
+| `LucideIcon.jsx` | React-safe Lucide icon wrapper (avoids DOM-reconciliation errors) |
 | `api.js` | Fetch wrapper for all backend endpoints |
 
 The shared Aperture design-system styles are under `static/ds/`, and the page
@@ -307,6 +325,11 @@ auth routes above):
   deployment.
 - AMD ROCm support is designed into device selection but has not been fully
   validated on the target AMD cloud hardware.
+- vLLM (Whisper inference) is Linux/CUDA only. macOS falls back to HuggingFace
+  Transformers, which is slower and uses more memory for the same model size.
+- pyannote.audio speaker diarization requires a HuggingFace token for some
+  model weights; if unavailable, the pipeline falls back to "UNKNOWN" speaker
+  labels.
 
 ## Project references
 

@@ -53,7 +53,7 @@ function NewMenu({ onUpload, onNewFolder }) {
       onMouseEnter={(e) => { e.currentTarget.style.background = "var(--gray-100)"; }}
       onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
     >
-      <i data-lucide={icon} style={{ width: 16, height: 16, color: "var(--text-muted-80)" }} />
+      <window.LucideIcon name={icon} size={16} style={{ color: "var(--text-muted-80)" }} />
       {label}
     </button>
   );
@@ -61,7 +61,7 @@ function NewMenu({ onUpload, onNewFolder }) {
   return (
     <div ref={ref} style={{ position: "relative" }}>
       <Button variant="primary" onClick={() => setOpen((v) => !v)}>
-        <i data-lucide="plus" style={{ width: 16, height: 16 }} />
+        <window.LucideIcon name="plus" size={16} />
         New
       </Button>
       {open && (
@@ -88,8 +88,6 @@ function FileBrowser(props) {
 
   const [dragging, setDragging] = React.useState(false);
   const inputRef = React.useRef(null);
-
-  React.useEffect(() => { if (window.lucide) window.lucide.createIcons(); });
 
   const selected = selectedId ? files.find((f) => f.id === selectedId) : null;
   const currentFolder = folders && folders.find((f) => f.id === currentFolderId);
@@ -190,7 +188,7 @@ function FileBrowser(props) {
                   }}
                 >
                   <div style={{ width: 56, height: 56, borderRadius: "var(--radius-full)", background: "var(--blue-50)", color: "var(--accent-primary)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                    <i data-lucide="upload-cloud" style={{ width: 26, height: 26 }} />
+                    <window.LucideIcon name="upload-cloud" size={26} />
                   </div>
                   <div>
                     <div style={{ fontFamily: "var(--font-display)", fontSize: "var(--text-body-size)", fontWeight: 600, color: "var(--text-ink)" }}>

@@ -267,3 +267,47 @@ def test_the_headline_formats_are_convertible():
     for ext in (".pdf", ".docx", ".pptx", ".xlsx", ".txt", ".md", ".csv",
                 ".rtf", ".py", ".ipynb", ".html", ".tex", ".png"):
         assert ext in CONVERTIBLE_EXTENSIONS, ext
+
+
+# ----------------------------------------------------------------------------
+# Audio format routing
+# ----------------------------------------------------------------------------
+
+def test_detect_format_audio_extensions(tmp_path: Path):
+    for ext in (".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".wma"):
+        p = tmp_path / f"test{ext}"
+        p.write_text("not real audio data")
+        assert detect_format(p) == "AUDIO", f"failed for {ext}"
+
+
+def test_classify_route_audio_to_audio():
+    assert classify_route("AUDIO") == FormatRoute.AUDIO
+    assert classify_route("MP3") == FormatRoute.AUDIO
+    assert classify_route("WAV") == FormatRoute.AUDIO
+    assert classify_route("M4A") == FormatRoute.AUDIO
+    assert classify_route("FLAC") == FormatRoute.AUDIO
+    assert classify_route("OGG") == FormatRoute.AUDIO
+    assert classify_route("AAC") == FormatRoute.AUDIO
+    assert classify_route("WMA") == FormatRoute.AUDIO
+
+
+def test_route_audio_mp3(tmp_path: Path):
+    p = tmp_path / "song.mp3"
+    p.write_text("not real audio")
+    fmt, r = route(p)
+    assert fmt == "AUDIO"
+    assert r == FormatRoute.AUDIO
+
+
+def test_supported_extensions_includes_audio():
+    from uir_pipeline.format_router import SUPPORTED_EXTENSIONS
+
+    for ext in (".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".wma"):
+        assert ext in SUPPORTED_EXTENSIONS, f"missing {ext}"
+
+
+def test_convertible_extensions_includes_audio():
+    from uir_pipeline.format_router import CONVERTIBLE_EXTENSIONS
+
+    for ext in (".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".wma"):
+        assert ext in CONVERTIBLE_EXTENSIONS, f"missing {ext}"

@@ -76,7 +76,7 @@ function PreviewTile({ file, size }) {
   }
   // Fallback / non-image types: a centred filetype glyph, no shadow.
   return frame(
-    <i data-lucide={file.status === "error" ? "file-warning" : iconFor(file.name)} style={{ width: size * 0.4, height: size * 0.4, color: "var(--text-muted-80)" }} />
+    <window.LucideIcon name={file.status === "error" ? "file-warning" : iconFor(file.name)} size={size * 0.4} style={{ color: "var(--text-muted-80)" }} />
   );
 }
 
@@ -89,14 +89,14 @@ function StatusChip({ status }) {
   if (status === "done") {
     return (
       <div className="ap-badge-pop" style={{ position: "absolute", top: 8, right: 8, width: 20, height: 20, borderRadius: "50%", background: "var(--status-success)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", border: "2px solid var(--surface-canvas)" }}>
-        <i data-lucide="check" style={{ width: 11, height: 11 }} />
+        <window.LucideIcon name="check" size={11} />
       </div>
     );
   }
   if (status === "error") {
     return (
       <div className="ap-badge-pop" style={{ position: "absolute", top: 8, right: 8, width: 20, height: 20, borderRadius: "50%", background: "var(--status-error)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", border: "2px solid var(--surface-canvas)" }}>
-        <i data-lucide="x" style={{ width: 11, height: 11 }} />
+        <window.LucideIcon name="x" size={11} />
       </div>
     );
   }
@@ -133,13 +133,13 @@ function FileCard({ file, selected, onSelect, onDelete }) {
             onClick={(e) => { e.stopPropagation(); onDelete(file.id); }}
             style={{ position: "absolute", bottom: 6, right: 6, width: 24, height: 24, borderRadius: "50%", background: "var(--status-error)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", border: "2px solid var(--surface-canvas)", cursor: "pointer" }}
           >
-            <i data-lucide="trash-2" style={{ width: 12, height: 12 }} />
+            <window.LucideIcon name="trash-2" size={12} />
           </div>
         )}
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 6, minHeight: 20 }}>
-        <i data-lucide={iconFor(file.name)} style={{ width: 14, height: 14, color: "var(--text-muted-48)", flexShrink: 0 }} />
+        <window.LucideIcon name={iconFor(file.name)} size={14} style={{ color: "var(--text-muted-48)", flexShrink: 0 }} />
         <span style={{ fontSize: "var(--text-caption-size)", fontWeight: 600, color: "var(--text-ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {file.name}
         </span>

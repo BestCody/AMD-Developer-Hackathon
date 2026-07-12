@@ -34,6 +34,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from contextlib import contextmanager
 from typing import Any, Final
 
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -203,10 +204,15 @@ class UserStore:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(_SCHEMA)
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Any:
         conn = sqlite3.connect(self.db_path, timeout=10.0)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     # -- writes ---------------------------------------------------------
 

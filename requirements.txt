@@ -107,3 +107,13 @@ jsonschema>=4.0
 # :class:`DoclingUnavailable` so the operator sees the cause. Pinned to
 # the 2.x line because 2.111.0 is the version that was smoke-tested.
 docling>=2.111,<3
+
+# --- Audio pipeline (vLLM Whisper + speaker diarization) ---
+# vLLM: inference engine for Whisper model. Supports CUDA/ROCm.
+# Requires torch-compatible CUDA/ROCm drivers.
+vllm>=0.7.3,<0.8
+# pyannote.audio: speaker diarization. Requires torch-audio.
+pyannote.audio>=3.1,<4
+# pydub: audio metadata extraction (duration, sample rate, channels).
+# Requires ffmpeg installed on the host system PATH.
+pydub>=0.25,<1

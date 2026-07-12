@@ -36,7 +36,7 @@ function FolderRow({ name, icon, count, selected, onClick, trailing }) {
       onMouseEnter={(e) => { if (!selected) e.currentTarget.style.background = "var(--gray-100)"; }}
       onMouseLeave={(e) => { if (!selected) e.currentTarget.style.background = "transparent"; }}
     >
-      <i data-lucide={icon} style={{ width: 16, height: 16, flexShrink: 0, color: selected ? "var(--accent-primary)" : "var(--text-muted-80)" }} />
+      <window.LucideIcon name={icon} size={16} style={{ flexShrink: 0, color: selected ? "var(--accent-primary)" : "var(--text-muted-80)" }} />
       <span style={{ fontSize: "var(--text-caption-size)", fontWeight: selected ? 600 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
         {name}
       </span>
@@ -77,7 +77,7 @@ function KebabMenu({ onRename, onDelete }) {
         aria-label="Folder actions"
         style={{ border: "none", background: "transparent", cursor: "pointer", padding: 2, display: "flex", color: "var(--text-muted-48)" }}
       >
-        <i data-lucide="ellipsis" style={{ width: 16, height: 16 }} />
+        <window.LucideIcon name="ellipsis" size={16} />
       </button>
       {open && (
         <div style={{
@@ -111,7 +111,7 @@ function FileTree({ folders, currentFolderId, counts, onSelectFolder, onNewFolde
           title="New folder"
           style={{ border: "none", background: "transparent", cursor: "pointer", padding: 2, color: "var(--accent-primary)", display: "flex" }}
         >
-          <i data-lucide="folder-plus" style={{ width: 16, height: 16 }} />
+          <window.LucideIcon name="folder-plus" size={16} />
         </button>
       </div>
 

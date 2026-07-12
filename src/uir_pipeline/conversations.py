@@ -26,6 +26,7 @@ import json
 import logging
 import sqlite3
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Final
 
@@ -133,14 +134,19 @@ class ConversationStore:
             conn.execute("DROP TABLE IF EXISTS conversation_members")
             conn.execute("DROP TABLE IF EXISTS conversations")
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Any:
         conn = sqlite3.connect(self.db_path, timeout=10.0)
         conn.row_factory = sqlite3.Row
         # CASCADE only fires with foreign keys on, and the pragma is
         # per-connection: without it, deleting a conversation orphans its
         # members and messages.
         conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     # -- conversations --------------------------------------------------
 

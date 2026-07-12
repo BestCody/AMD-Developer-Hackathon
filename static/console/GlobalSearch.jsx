@@ -63,8 +63,6 @@ function GlobalSearch({ open, onClose, onOpenDocument }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
-  React.useEffect(() => { if (window.lucide) window.lucide.createIcons(); });
-
   if (!open) return null;
 
   function pick(r) {
@@ -91,7 +89,7 @@ function GlobalSearch({ open, onClose, onOpenDocument }) {
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 16px", borderBottom: "1px solid var(--border-hairline)" }}>
-          <i data-lucide="search" style={{ width: 18, height: 18, color: "var(--text-muted-48)" }} />
+          <window.LucideIcon name="search" size={18} style={{ color: "var(--text-muted-48)" }} />
           <input
             ref={inputRef}
             value={q}
@@ -108,7 +106,7 @@ function GlobalSearch({ open, onClose, onOpenDocument }) {
             aria-label="Close"
             style={{ border: "none", background: "transparent", cursor: "pointer", color: "var(--text-muted-48)", display: "flex" }}
           >
-            <i data-lucide="x" style={{ width: 18, height: 18 }} />
+            <window.LucideIcon name="x" size={18} />
           </button>
         </div>
 
@@ -141,7 +139,7 @@ function GlobalSearch({ open, onClose, onOpenDocument }) {
               onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
             >
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <i data-lucide="file-text" style={{ width: 14, height: 14, color: "var(--text-muted-48)", flexShrink: 0 }} />
+                <window.LucideIcon name="file-text" size={14} style={{ color: "var(--text-muted-48)", flexShrink: 0 }} />
                 <span style={{ fontSize: "var(--text-caption-size)", fontWeight: 600, color: "var(--text-ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
                   {r.doc_title}
                 </span>

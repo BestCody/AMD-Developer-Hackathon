@@ -237,6 +237,24 @@ def build_umr(
     lang = _coerce_str(meta.get("language"), default="").strip()
     if lang:
         eyebrow_parts.append(f"language: {lang}")
+
+    # Audio-specific metadata eyebrow additions.
+    modal_type = (uir_doc or {}).get("modal_type", "")
+    if modal_type == "audio":
+        audio_meta = (meta.get("modal_features") or {}).get("audio") or {}
+        dur = audio_meta.get("duration_seconds")
+        if dur is not None:
+            eyebrow_parts.append(f"duration: {float(dur):.1f}s")
+        sr = audio_meta.get("sample_rate")
+        if sr:
+            eyebrow_parts.append(f"sample rate: {int(sr)} Hz")
+        ch = audio_meta.get("channels")
+        if ch:
+            eyebrow_parts.append(f"channels: {int(ch)}")
+        spk_count = audio_meta.get("speaker_count")
+        if spk_count is not None:
+            eyebrow_parts.append(f"speakers: {int(spk_count)}")
+
     if eyebrow_parts:
         lines.append("*" + " · ".join(eyebrow_parts) + "*")
         lines.append("")
@@ -405,24 +423,42 @@ def _render_children_recursive(
 
 def _render_chunk(chunk: dict[str, Any], lines: list[str]) -> None:
     """Emit one chunk's blockquote-anchor + body text into ``lines``."""
-    cid = _coerce_str(chunk.get("id"), default="(no-id)")
-    page = _coerce_int(chunk.get("page"), default=0)
-    bbox = chunk.get("bounding_box")
-    bbox_s = _bbox_str(bbox)
-    tokens = _coerce_int(chunk.get("token_count"), default=0)
-    kind = _kind_label(chunk)
-    spath = _section_path(chunk)
-    spath_part = f" · §{spath}" if spath else ""
+    mf = chunk.get("modal_features") or {}
+    audio_seg = mf.get("audio_segment")
 
-    # Anchor line: a blockquote (>) so markdown renderers treat it as a
-    # distinct citation block. Includes chunk id (so the agent can cite),
-    # page (1-based), bbox (canvas rect), token count, region_kind, and
-    # optional section path. The chunk body follows on subsequent lines
-    # WITHOUT the blockquote prefix so it renders as plain text.
-    lines.append(
-        f"> **[{cid} · page {page} · bbox {bbox_s} · "
-        f"{tokens} tok · {kind}]{spath_part}**"
-    )
+    if audio_seg:
+        # Audio chunk rendering: speaker label + timestamp instead of page/bbox.
+        speaker = _coerce_str(audio_seg.get("speaker"), default="UNKNOWN")
+        start = audio_seg.get("start", 0)
+        end = audio_seg.get("end", 0)
+        tokens = _coerce_int(chunk.get("token_count"), default=0)
+
+        start_fmt = f"{int(start) // 60}:{int(start) % 60:02d}"
+        end_fmt = f"{int(end) // 60}:{int(end) % 60:02d}"
+
+        lines.append(
+            f"> **{speaker} · {start_fmt} - {end_fmt} · {tokens} tok**"
+        )
+    else:
+        # Standard document chunk rendering.
+        cid = _coerce_str(chunk.get("id"), default="(no-id)")
+        page = _coerce_int(chunk.get("page"), default=0)
+        bbox = chunk.get("bounding_box")
+        bbox_s = _bbox_str(bbox)
+        tokens = _coerce_int(chunk.get("token_count"), default=0)
+        kind = _kind_label(chunk)
+        spath = _section_path(chunk)
+        spath_part = f" · §{spath}" if spath else ""
+
+        # Anchor line: a blockquote (>) so markdown renderers treat it as a
+        # distinct citation block. Includes chunk id (so the agent can cite),
+        # page (1-based), bbox (canvas rect), token count, region_kind, and
+        # optional section path. The chunk body follows on subsequent lines
+        # WITHOUT the blockquote prefix so it renders as plain text.
+        lines.append(
+            f"> **[{cid} · page {page} · bbox {bbox_s} · "
+            f"{tokens} tok · {kind}]{spath_part}**"
+        )
     body = _sanitize_text(_coerce_str(chunk.get("text"), default=""))
     if body:
         lines.append(body)

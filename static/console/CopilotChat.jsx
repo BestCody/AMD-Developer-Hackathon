@@ -40,7 +40,7 @@ function ToolSteps({ steps }) {
             borderRadius: "var(--radius-pill)", padding: "3px 10px",
             fontSize: "var(--text-micro-legal-size)", fontWeight: 600,
           }}>
-            <i data-lucide={isMore ? "plus-circle" : "search"} style={{ width: 12, height: 12 }} />
+            <window.LucideIcon name={isMore ? "plus-circle" : "search"} size={12} />
             {label}
           </span>
         );
@@ -90,7 +90,6 @@ function FireworksChat({ files }) {
   const [error, setError] = React.useState("");
   const scrollRef = React.useRef(null);
 
-  React.useEffect(() => { if (window.lucide) window.lucide.createIcons(); });
   React.useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages, busy]);
@@ -211,7 +210,7 @@ function FireworksChat({ files }) {
             justifyContent: "center", cursor: busy || !draft.trim() ? "not-allowed" : "pointer", flexShrink: 0,
           }}
         >
-          <i data-lucide="arrow-up" style={{ width: 18, height: 18 }}></i>
+          <window.LucideIcon name="arrow-up" size={18} />
         </button>
       </div>
     </div>

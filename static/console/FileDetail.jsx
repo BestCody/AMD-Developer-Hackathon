@@ -84,7 +84,7 @@ function BigPreview({ job, name }) {
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
       gap: 10, width: "100%", minHeight: 220, maxHeight: "46vh", padding: 24,
       background: "var(--surface-parchment)", borderRadius: "var(--radius-lg)", color: "var(--text-muted-48)" }}>
-      <i data-lucide={iconFor(name)} style={{ width: 64, height: 64 }} />
+      <window.LucideIcon name={iconFor(name)} size={64} />
       <span style={{ fontSize: "var(--text-caption-size)" }}>No graphical preview for this file type</span>
     </div>
   );
@@ -215,7 +215,7 @@ function FileDetail({ file, folders, onBack, onDelete, onMoveFile }) {
       <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 20px", borderBottom: "1px solid var(--border-hairline)", flexShrink: 0 }}>
         <button onClick={onBack} title="Back to files"
           style={{ border: "none", background: "transparent", cursor: "pointer", padding: 4, color: "var(--accent-primary)", display: "flex" }}>
-          <i data-lucide="arrow-left" style={{ width: 20, height: 20 }} />
+          <window.LucideIcon name="arrow-left" size={20} />
         </button>
         <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, overflow: "hidden" }}>
@@ -248,7 +248,7 @@ function FileDetail({ file, folders, onBack, onDelete, onMoveFile }) {
         {onDelete && (
           <button onClick={() => onDelete(file.id)} title="Delete file"
             style={{ border: "none", background: "transparent", cursor: "pointer", padding: 4, color: "var(--status-error)", display: "flex" }}>
-            <i data-lucide="trash-2" style={{ width: 18, height: 18 }} />
+            <window.LucideIcon name="trash-2" size={18} />
           </button>
         )}
       </div>

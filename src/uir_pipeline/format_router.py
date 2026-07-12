@@ -53,6 +53,7 @@ class FormatRoute(str, Enum):
     PPTX_NATIVE = "pptx"
     TEXT = "text"
     IMAGE = "image"
+    AUDIO = "audio"
     SKIP = "skip"
 
 
@@ -127,6 +128,12 @@ _IMAGE_EXTENSIONS: Final[frozenset[str]] = frozenset({
     ".bmp", ".gif", ".webp",
 })
 
+# Audio formats -- routed through vLLM Whisper + pyannote speaker diarization.
+_AUDIO_EXTENSIONS: Final[frozenset[str]] = frozenset({
+    ".mp3", ".wav", ".m4a",
+    ".flac", ".ogg", ".aac", ".wma",
+})
+
 
 # ----------------------------------------------------------------------------
 # Detection
@@ -161,6 +168,8 @@ def detect_format(path: str | Path) -> str:
         return ""
     if ext in _IMAGE_EXTENSIONS:
         return "IMAGE"
+    if ext in _AUDIO_EXTENSIONS:
+        return "AUDIO"
     if ext in _DOCLING_EXTENSIONS:
         return _detect_zip_subtype(p) if ext in {".docx", ".pptx", ".xlsx", ".epub"} \
             else ext.lstrip(".").upper()
@@ -237,6 +246,8 @@ def classify_route(format_str: str) -> FormatRoute:
         return FormatRoute.DOCLING
     if fs == "IMAGE" or fs in {e.lstrip(".").upper() for e in _IMAGE_EXTENSIONS}:
         return FormatRoute.IMAGE
+    if fs == "AUDIO" or fs in {e.lstrip(".").upper() for e in _AUDIO_EXTENSIONS}:
+        return FormatRoute.AUDIO
     if fs in {e.lstrip(".").upper() for e in _TEXT_EXTENSIONS}:
         return FormatRoute.TEXT
     return FormatRoute.SKIP
@@ -283,6 +294,7 @@ SUPPORTED_EXTENSIONS: Final[frozenset[str]] = frozenset({
     *_DOCLING_EXTENSIONS,
     *_TEXT_EXTENSIONS,
     *_IMAGE_EXTENSIONS,
+    *_AUDIO_EXTENSIONS,
 })
 
 #: Extensions the orchestrator can actually convert.

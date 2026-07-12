@@ -16,10 +16,6 @@ function IconRail({ active, onChange, user, onLogout, onOpenSearch }) {
     { id: "fireworks", label: "Fireworks", icon: "sparkles" },
   ];
 
-  React.useEffect(() => {
-    if (window.lucide) window.lucide.createIcons();
-  });
-
   const initial = ((user && (user.name || user.email)) || "?").trim().charAt(0).toUpperCase();
 
   return (
@@ -69,7 +65,7 @@ function IconRail({ active, onChange, user, onLogout, onOpenSearch }) {
             onMouseUp={(e) => (e.currentTarget.style.transform = "scale(1)")}
             onMouseLeave={(e) => (e.currentTarget.style.transform = "scale(1)")}
           >
-            <i data-lucide={it.icon} style={{ width: 26, height: 26 }}></i>
+            <window.LucideIcon name={it.icon} size={26} />
             <span style={{ fontSize: 11, fontWeight: 600 }}>{it.label}</span>
           </button>
         );
@@ -94,7 +90,7 @@ function IconRail({ active, onChange, user, onLogout, onOpenSearch }) {
         onMouseUp={(e) => (e.currentTarget.style.transform = "scale(1)")}
         onMouseLeave={(e) => (e.currentTarget.style.transform = "scale(1)")}
       >
-        <i data-lucide="search" style={{ width: 26, height: 26 }}></i>
+        <window.LucideIcon name="search" size={26} />
         <span style={{ fontSize: 11, fontWeight: 600 }}>Search</span>
       </button>
 

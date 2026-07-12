@@ -97,6 +97,8 @@
   window.MONADLABS_CONFIG = { maxUploadMb: {{ max_upload_mb | tojson }} };
 </script>
 
+<!-- LucideIcon must load before every component that uses it. -->
+<script type="text/babel" data-presets="react" src="{{ url_for('static', filename='console/LucideIcon.jsx') }}"></script>
 <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='console/AuthScreens.jsx') }}"></script>
 <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='console/IconRail.jsx') }}"></script>
 <script type="text/babel" data-presets="react" src="{{ url_for('static', filename='console/FileCard.jsx') }}"></script>

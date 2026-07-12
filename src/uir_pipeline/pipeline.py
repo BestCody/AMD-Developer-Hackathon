@@ -151,6 +151,15 @@ class ImageAnalysisError(RuntimeError):
     """
 
 
+class AudioAnalysisError(RuntimeError):
+    """The AUDIO route could not transcribe the audio file.
+
+    `run_audio_pipeline` reports failure in `AudioPipelineResult.error` rather
+    than raising, so the orchestrator has to translate. Mirrors the same
+    pattern as `ImageAnalysisError`.
+    """
+
+
 class _NoFigureSource(Exception):
     """The chosen route produced no figure regions to caption.
 
@@ -528,6 +537,26 @@ def run(
             chunk_count=1,
             entity_count=0,
             elapsed_seconds=img_result.elapsed_seconds,
+        )
+
+    if froute is FormatRoute.AUDIO:
+        from uir_pipeline.audio_pipeline import run_audio_pipeline
+
+        audio_result = run_audio_pipeline(
+            p,
+            output_dir=output_dir,
+            dry_run=dry_run,
+            on_progress=on_progress,
+        )
+        if audio_result.error:
+            raise AudioAnalysisError(audio_result.error)
+        return PipelineResult(
+            uir_id=audio_result.uir_id,
+            out_path=audio_result.out_path,
+            umr_path=audio_result.umr_path,
+            chunk_count=audio_result.chunk_count,
+            entity_count=audio_result.entity_count,
+            elapsed_seconds=audio_result.elapsed_seconds,
         )
 
     from uir_pipeline.chunk import chunk_text
@@ -1146,6 +1175,8 @@ def run(
 
 # Re-exports for callers that prefer ``pipeline.derive_doc_id``-style imports.
 __all__ = [
+    "AudioAnalysisError",
+    "ImageAnalysisError",
     "PipelineResult",
     "run",
 ]

@@ -45,7 +45,7 @@ function ToolSteps({ steps }) {
             borderRadius: "var(--radius-pill)", padding: "3px 10px",
             fontSize: "var(--text-micro-legal-size)", fontWeight: 600,
           }}>
-            <i data-lucide={isMore ? "plus-circle" : "search"} style={{ width: 12, height: 12 }} />
+            <window.LucideIcon name={isMore ? "plus-circle" : "search"} size={12} />
             {label}
           </span>
         );
@@ -108,7 +108,7 @@ function Message({ m, myEmail }) {
     <div style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start", alignItems: "flex-end", gap: 8 }}>
       {isAssistant && (
         <div style={{ width: 22, height: 22, borderRadius: "50%", background: "var(--accent-primary)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginBottom: 2 }}>
-          <i data-lucide="sparkles" style={{ width: 12, height: 12 }}></i>
+          <window.LucideIcon name="sparkles" size={12} />
         </div>
       )}
       <div style={{ maxWidth: "74%" }}>
@@ -168,7 +168,6 @@ function ChatsPanel({ user }) {
   const [cmdDrop, setCmdDrop] = React.useState(false);
   React.useEffect(() => { busyRef.current = busy; }, [busy]);
 
-  React.useEffect(() => { if (window.lucide) window.lucide.createIcons(); });
   React.useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages, busy]);
@@ -286,7 +285,7 @@ function ChatsPanel({ user }) {
             aria-label="Back"
             style={{ border: "1px solid var(--border-hairline)", background: "var(--surface-canvas)", cursor: "pointer", color: "var(--text-ink)", display: "flex", alignItems: "center", justifyContent: "center", width: 36, height: 36, borderRadius: "var(--radius-full)", flexShrink: 0, position: "absolute", left: 0 }}
           >
-            <i data-lucide="chevron-left" style={{ width: 20, height: 20 }}></i>
+            <window.LucideIcon name="chevron-left" size={20} />
           </button>
           <div style={{ fontFamily: "var(--font-display)", fontSize: "var(--text-tagline-size)", fontWeight: 600, color: "var(--text-ink)" }}>New chat</div>
         </div>
@@ -336,7 +335,7 @@ function ChatsPanel({ user }) {
                   onMouseEnter={(e) => e.currentTarget.style.background = "var(--surface-parchment)"}
                   onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
                 >
-                  <i data-lucide="user" style={{ width: 14, height: 14, color: "var(--text-muted-48)", flexShrink: 0 }} />
+                  <window.LucideIcon name="user" size={14} style={{ color: "var(--text-muted-48)", flexShrink: 0 }} />
                   <div style={{ overflow: "hidden" }}>
                     <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{u.email}</div>
                     <div style={{ fontSize: "var(--text-caption-size)", color: "var(--text-muted-48)" }}>{u.name || "No name"}</div>
@@ -371,7 +370,7 @@ function ChatsPanel({ user }) {
             aria-label="Back"
             style={{ border: "1px solid var(--border-hairline)", background: "var(--surface-canvas)", cursor: "pointer", color: "var(--text-ink)", display: "flex", alignItems: "center", justifyContent: "center", width: 36, height: 36, borderRadius: "var(--radius-full)", flexShrink: 0 }}
           >
-            <i data-lucide="chevron-left" style={{ width: 20, height: 20 }}></i>
+            <window.LucideIcon name="chevron-left" size={20} />
           </button>
           <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", gap: 2 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, overflow: "hidden" }}>
@@ -391,7 +390,7 @@ function ChatsPanel({ user }) {
             aria-label="Leave conversation"
             style={{ border: "none", background: "transparent", cursor: "pointer", color: "var(--text-muted-48)", display: "flex", alignItems: "center", justifyContent: "center", width: 36, height: 36, flexShrink: 0 }}
           >
-            <i data-lucide="trash-2" style={{ width: 18, height: 18 }}></i>
+            <window.LucideIcon name="trash-2" size={18} />
           </button>
         </div>
 
@@ -449,7 +448,7 @@ function ChatsPanel({ user }) {
                   onMouseEnter={(e) => e.currentTarget.style.background = "var(--surface-parchment)"}
                   onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
                 >
-                  <i data-lucide="at-sign" style={{ width: 14, height: 14, color: "var(--text-muted-48)" }} />
+                  <window.LucideIcon name="at-sign" size={14} style={{ color: "var(--text-muted-48)" }} />
                   <span style={{ fontWeight: 600 }}>@fireworks</span>
                   <span style={{ color: "var(--text-muted-48)", fontSize: "var(--text-caption-size)" }}>Ask your documents</span>
                 </button>
@@ -460,7 +459,7 @@ function ChatsPanel({ user }) {
             onClick={send} aria-label="Send" disabled={busy || !draft.trim()}
             style={{ width: 48, height: 48, borderRadius: "var(--radius-full)", border: "none", background: busy || !draft.trim() ? "var(--gray-200)" : "var(--accent-primary)", color: "var(--on-accent)", display: "flex", alignItems: "center", justifyContent: "center", cursor: busy || !draft.trim() ? "not-allowed" : "pointer", flexShrink: 0 }}
           >
-            <i data-lucide="arrow-up" style={{ width: 18, height: 18 }}></i>
+            <window.LucideIcon name="arrow-up" size={18} />
           </button>
         </div>
       </div>
@@ -487,10 +486,10 @@ function ChatsPanel({ user }) {
           aria-label="New chat"
           style={{ width: 44, height: 44, borderRadius: "var(--radius-full)", flexShrink: 0, border: "1px solid var(--border-hairline)", background: "var(--surface-canvas)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "var(--text-ink)" }}
         >
-          <i data-lucide="plus" style={{ width: 20, height: 20 }}></i>
+          <window.LucideIcon name="plus" size={20} />
         </button>
         <div style={{ flex: 1, position: "relative", display: "flex", alignItems: "center" }}>
-          <i data-lucide="search" style={{ width: 16, height: 16, position: "absolute", left: 14, color: "var(--text-muted-48)" }}></i>
+          <window.LucideIcon name="search" size={16} style={{ position: "absolute", left: 14, color: "var(--text-muted-48)" }} />
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -525,7 +524,7 @@ function ChatsPanel({ user }) {
                 style={{ display: "flex", alignItems: "center", gap: 14, flex: 1, minWidth: 0, border: "none", background: "transparent", cursor: "pointer", textAlign: "left", padding: 0 }}
               >
                 <div style={{ width: 40, height: 40, borderRadius: "50%", background: "var(--gray-100)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, color: "var(--text-muted-80)" }}>
-                  <i data-lucide="user" style={{ width: 18, height: 18 }}></i>
+                  <window.LucideIcon name="user" size={18} />
                 </div>
                 <div style={{ overflow: "hidden" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: "var(--text-body-strong-size)", fontWeight: "var(--text-body-strong-weight)", color: "var(--text-ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -545,7 +544,7 @@ function ChatsPanel({ user }) {
                 className="ap-file-delete"
                 style={{ border: "none", background: "transparent", cursor: "pointer", color: "var(--text-muted-48)", display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, flexShrink: 0 }}
               >
-                <i data-lucide="trash-2" style={{ width: 16, height: 16 }}></i>
+                <window.LucideIcon name="trash-2" size={16} />
               </button>
             </div>
           ))}

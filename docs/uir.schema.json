@@ -540,7 +540,8 @@
       "default": "document",
       "enum": [
         "document",
-        "image"
+        "image",
+        "audio"
       ],
       "title": "Modal Type",
       "type": "string"
