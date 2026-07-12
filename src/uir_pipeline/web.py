@@ -1110,6 +1110,7 @@ def create_app(
             ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
             ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
             ".tiff": "image/tiff", ".tif": "image/tiff",
+            ".avif": "image/avif", ".heic": "image/heic", ".heif": "image/heif",
         }
         if ext in _IMG_MIME:
             return send_file(upload_path, mimetype=_IMG_MIME[ext])
@@ -1182,6 +1183,7 @@ def create_app(
             ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
             ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
             ".tiff": "image/tiff", ".tif": "image/tiff",
+            ".avif": "image/avif", ".heic": "image/heic", ".heif": "image/heif",
         }
         mimetype = _MIME.get(ext) or "application/octet-stream"
         return send_file(
@@ -1390,10 +1392,14 @@ def create_app(
                 "tool_steps": [],
             }, 200
 
-        contexts = _chat.retrieve(paths, message)
-        # ``docs`` puts the agent in tool-calling mode: the model can call
-        # ``search`` / ``get_more_sources`` to fetch more passages from the
-        # caller's own documents. Without ``docs`` it stays single-shot.
+        # Autonomous mode: don't pre-fetch passages. The agent must call
+        # ``search`` / ``get_more_sources`` to find relevant passages itself.
+        # Single-shot mode (no docs) still retrieves up-front for backward
+        # compatibility with tests that don't supply a ``docs`` list.
+        if docs:
+            contexts = []
+        else:
+            contexts = _chat.retrieve(paths, message)
         result = _chat.answer(message, contexts, history=history, docs=docs, job_ids=job_ids)
 
         if not result["success"]:
@@ -1461,6 +1467,12 @@ def create_app(
         job_ids: set[str] | None = None
         if isinstance(body.get("job_ids"), list):
             job_ids = {str(j) for j in body["job_ids"]}
+
+        # Parse @filename mentions in the message and scope retrieval to them.
+        mention_ids, message = _parse_file_mentions(message, uid, jobs, jobs_lock)
+        if mention_ids:
+            job_ids = (job_ids or set()) | mention_ids
+
         history_raw = body.get("history")
         history: list[Any] = history_raw if isinstance(history_raw, list) else []
 
@@ -1554,6 +1566,10 @@ def create_app(
             # Ordinary message between the two people -- nothing to answer.
             return jsonify({"user_message": user_msg, "reply": None})
 
+        # Parse @filename mentions in the question and scope retrieval.
+        mention_ids, question = _parse_file_mentions(question, uid, jobs, jobs_lock)
+        job_ids = mention_ids if mention_ids else None
+
         # Model history: this thread's prior fireworks exchanges only -- the
         # stripped questions and the assistant answers. Ordinary person-to-
         # person messages are not part of the model dialogue.
@@ -1568,7 +1584,7 @@ def create_app(
                 if q:
                     history.append({"role": "user", "content": q})
 
-        payload, status = _grounded_answer(uid, question, history)
+        payload, status = _grounded_answer(uid, question, history, job_ids=job_ids)
         if status != 200:
             # Model failed. The user message is already saved; surface the
             # error without fabricating an assistant reply.
@@ -1688,6 +1704,52 @@ def _fireworks_question(text: str) -> str | None:
     if not m:
         return None
     return text[m.end():].strip()
+
+
+#: Matches ``@filename`` file mentions anywhere in the text.  The filename is
+#: captured as group 1 and may include spaces or dots (e.g. ``@My Report.pdf``).
+_FILE_MENTION_RE: re.Pattern[str] = re.compile(r"@([^\s@]+(?:\.\S+)?)")
+
+
+def _parse_file_mentions(
+    text: str,
+    uid: int,
+    jobs: dict[str, Any],
+    jobs_lock: threading.Lock,
+) -> tuple[set[str] | None, str]:
+    """Extract ``@filename`` mentions from ``text`` and resolve them to job IDs.
+
+    Returns ``(job_ids, cleaned_text)``.  ``job_ids`` is ``None`` when no
+    mentions were found, otherwise a set of ``job_id`` strings belonging to
+    ``uid``'s DONE jobs whose filename matches a mention.  The matching
+    mentions are removed from the returned text so the model never sees them.
+    """
+    if not text or not text.strip():
+        return None, text
+
+    mentions: set[str] = set()
+    with jobs_lock:
+        job_map = {
+            job.filename: job.job_id
+            for job in jobs.values()
+            if job.user_id == uid and job.status == JOB_DONE and job.filename
+        }
+    if not job_map:
+        return None, text
+
+    def _replace(match: re.Match[str]) -> str:
+        mention = match.group(1)
+        # Look for an exact filename match, or a case-insensitive one.
+        for filename, job_id in job_map.items():
+            if filename.lower() == mention.lower():
+                mentions.add(job_id)
+                return ""  # strip the mention from the text
+        return match.group(0)  # keep unmatched @words
+
+    cleaned = _FILE_MENTION_RE.sub(_replace, text)
+    # Normalise whitespace left by stripped mentions.
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    return (mentions if mentions else None), cleaned
 
 
 #: Hosts whose traffic never leaves the machine.

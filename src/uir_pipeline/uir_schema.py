@@ -216,6 +216,13 @@ class Metadata(BaseModel):
             "UIR was emitted by pre-§17 code paths (legacy PDFs only)."
         ),
     )
+    modal_features: dict[str, dict[str, Any]] = Field(
+        default_factory=dict,
+        description=(
+            "Free-form per-modality metadata.  Audio/video/email pipelines "
+            "store duration, resolution, sender etc. here without schema churn."
+        ),
+    )
 
 
 # ----------------------------------------------------------------------------

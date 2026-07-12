@@ -279,19 +279,22 @@ def test_chat_retrieves_only_own_documents(app, monkeypatch):
 
     captured: dict = {}
 
-    def _fake_retrieve(paths, q, **kw):
-        captured["paths"] = list(paths)
-        return []
-
     from uir_pipeline import chat as chat_mod
-    monkeypatch.setattr(chat_mod, "retrieve", _fake_retrieve)
-    monkeypatch.setattr(chat_mod, "answer", lambda q, ctx, **kw: {
-        "success": True, "answer": "stub", "citations": ctx, "grounded": bool(ctx),
-    })
+    monkeypatch.setattr(chat_mod, "retrieve", lambda *a, **kw: [])
+
+    def _fake_answer(q, ctx, **kw):
+        captured["message"] = q
+        captured["docs"] = kw.get("docs")
+        return {"success": True, "answer": "stub", "citations": ctx, "grounded": bool(ctx)}
+
+    monkeypatch.setattr(chat_mod, "answer", _fake_answer)
 
     r = alice.post("/api/chat", json={"message": "what does the fox do?"})
     assert r.status_code == 200
-    assert len(captured["paths"]) == 1
+    # Autonomous mode: docs are passed so the agent can search itself;
+    # retrieve is not called upfront.
+    assert captured["message"] == "what does the fox do?"
+    assert len(captured["docs"]) == 1
 
 
 def test_chat_surfaces_model_failure_instead_of_faking_an_answer(app, monkeypatch):

@@ -272,6 +272,22 @@ def build_umr(
         if frame_count is not None:
             eyebrow_parts.append(f"frames sampled: {int(frame_count)}")
 
+    # Email metadata eyebrow.
+    if meta.get("source") and meta.get("source").get("format", "").upper() in ("EML", "MSG"):
+        email_meta = meta.get("modal_features") or {}
+        subj = _coerce_str(email_meta.get("subject"), default="").strip()
+        if subj:
+            eyebrow_parts.append(f"subject: {subj}")
+        from_ = _coerce_str(email_meta.get("from"), default="").strip()
+        if from_:
+            eyebrow_parts.append(f"from: {from_}")
+        to = _coerce_str(email_meta.get("to"), default="").strip()
+        if to:
+            eyebrow_parts.append(f"to: {to}")
+        date = _coerce_str(email_meta.get("date"), default="").strip()
+        if date:
+            eyebrow_parts.append(f"date: {date}")
+
     if eyebrow_parts:
         lines.append("*" + " · ".join(eyebrow_parts) + "*")
         lines.append("")

@@ -90,6 +90,12 @@ function FireworksChat({ files }) {
   const [error, setError] = React.useState("");
   const scrollRef = React.useRef(null);
 
+  // @mention file autocomplete state
+  const [mentionDrop, setMentionDrop] = React.useState(false);
+  const [mentionQuery, setMentionQuery] = React.useState("");
+  const mentionRef = React.useRef(null);
+  const inputRef = React.useRef(null);
+
   React.useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages, busy]);
@@ -188,19 +194,71 @@ function FireworksChat({ files }) {
       </div>
 
       <div style={{ padding: "18px 8px 28px", display: "flex", gap: 10, alignItems: "center" }}>
-        <input
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-          placeholder="Ask about your documents…"
-          disabled={busy}
-          style={{
-            flex: 1, fontFamily: "var(--font-text)", fontSize: "var(--text-body-size)",
-            color: "var(--text-ink)", background: "var(--surface-canvas)",
-            border: "1px solid var(--border-hairline)", borderRadius: "var(--radius-pill)",
-            height: 48, padding: "0 20px", outline: "none",
-          }}
-        />
+        <div style={{ position: "relative", flex: 1 }} ref={mentionRef}>
+          <input
+            ref={inputRef}
+            value={draft}
+            onChange={(e) => {
+              const v = e.target.value;
+              setDraft(v);
+              const lastAt = v.lastIndexOf("@");
+              if (lastAt >= 0 && !/\s/.test(v.slice(lastAt + 1))) {
+                const q = v.slice(lastAt + 1).toLowerCase();
+                setMentionQuery(q);
+                setMentionDrop(q.length > 0);
+              } else {
+                setMentionDrop(false);
+                setMentionQuery("");
+              }
+            }}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+            placeholder="Ask about your documents…"
+            disabled={busy}
+            style={{
+              width: "100%", flex: 1, fontFamily: "var(--font-text)", fontSize: "var(--text-body-size)",
+              color: "var(--text-ink)", background: "var(--surface-canvas)",
+              border: "1px solid var(--border-hairline)", borderRadius: "var(--radius-pill)",
+              height: 48, padding: "0 20px", outline: "none",
+            }}
+          />
+          {mentionDrop && (
+            <div style={{
+              position: "absolute", bottom: "calc(100% + 4px)", left: 0, right: 0, maxHeight: 200, overflow: "auto",
+              background: "var(--surface-canvas)", border: "1px solid var(--border-hairline)",
+              borderRadius: "var(--radius-sm)", boxShadow: "var(--shadow-ring)", zIndex: 10,
+            }}>
+              {converted.filter((f) => f.name.toLowerCase().includes(mentionQuery.toLowerCase())).slice(0, 8).map((f) => (
+                <button
+                  key={f.id}
+                  onClick={() => {
+                    const lastAt = draft.lastIndexOf("@");
+                    const nextDraft = draft.slice(0, lastAt) + "@" + f.name + " " + draft.slice(lastAt + 1 + mentionQuery.length);
+                    setDraft(nextDraft);
+                    setMentionDrop(false);
+                    setMentionQuery("");
+                    setTimeout(() => inputRef.current && inputRef.current.focus(), 0);
+                  }}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "10px 14px",
+                    border: "none", background: "transparent", cursor: "pointer", textAlign: "left",
+                    fontFamily: "var(--font-text)", fontSize: "var(--text-body-size)", color: "var(--text-ink)",
+                    borderBottom: "1px solid var(--border-hairline)",
+                  }}
+                  onMouseEnter={(e) => e.currentTarget.style.background = "var(--surface-parchment)"}
+                  onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
+                >
+                  <window.LucideIcon name="file-text" size={14} style={{ color: "var(--text-muted-48)" }} />
+                  <span style={{ fontWeight: 600 }}>@{f.name}</span>
+                </button>
+              ))}
+              {converted.filter((f) => f.name.toLowerCase().includes(mentionQuery.toLowerCase())).length === 0 && (
+                <div style={{ padding: "10px 14px", color: "var(--text-muted-48)", fontSize: "var(--text-caption-size)" }}>
+                  No matching files.
+                </div>
+              )}
+            </div>
+          )}
+        </div>
         <button
           onClick={send} aria-label="Send" disabled={busy || !draft.trim()}
           style={{

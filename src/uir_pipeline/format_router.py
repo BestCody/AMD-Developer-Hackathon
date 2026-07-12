@@ -120,6 +120,8 @@ _TEXT_EXTENSIONS: Final[frozenset[str]] = frozenset({
     ".json", ".jsonl", ".ndjson",
     ".xml", ".svg",
     ".rst",
+    # Email formats (extracted to text by ``email_pipeline`` before paginating).
+    ".eml", ".msg",
 })
 
 # Image formats -- routed through Florence-2 captioner.
@@ -127,6 +129,7 @@ _IMAGE_EXTENSIONS: Final[frozenset[str]] = frozenset({
     ".png", ".jpg", ".jpeg",
     ".tif", ".tiff",
     ".bmp", ".gif", ".webp",
+    ".avif", ".heic", ".heif",
 })
 
 # Audio formats -- routed through vLLM Whisper + pyannote speaker diarization.

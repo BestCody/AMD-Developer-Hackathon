@@ -76,7 +76,7 @@ class TestImageConversion:
         assert data_uri.startswith("data:image/png;base64,")
 
     def test_unsupported_extension(self, tmp_image_dir: Path) -> None:
-        path = tmp_image_dir / "test.heic"
+        path = tmp_image_dir / "test.xyz"
         path.write_bytes(b"fake")
         with pytest.raises(ValueError, match="unsupported.*extension"):
             load_image_as_png(path)

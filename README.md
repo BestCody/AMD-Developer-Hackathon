@@ -24,6 +24,7 @@ input file
    +-- text, Markdown, CSV, source code -> direct text extraction
    +-- images                            -> Fireworks vision
    +-- audio (MP3, WAV, M4A, FLAC, etc.) -> vLLM Whisper + pyannote diarization
+   +-- email (.eml, .msg)               -> MIME / Outlook parser
    |
    v
 typed regions -> chunks -> enrichment -> embeddings -> UIR JSON + UMR Markdown
@@ -66,8 +67,9 @@ command-palette search overlay.
 Ask questions about your converted documents. The assistant uses a Fireworks
 chat model (MiniMax-M3) with a retrieval + agentic loop:
 
-- The model can call `search` and `get_more_sources` to find more passages
-  before answering.
+- The model is fully autonomous: it is given the list of your documents and
+  must call `search` / `get_more_sources` to find relevant passages before
+  answering.  No passages are pre-loaded.
 - Answers are rendered as **Markdown** (bold, lists, code, tables) with
   **DOMPurify** sanitization.
 - Every answer shows **tool-step chips** (e.g. "Searched 'invoices' — 5
@@ -82,6 +84,9 @@ chat model (MiniMax-M3) with a retrieval + agentic loop:
 3. Type `@fireworks <question>` to ask your own documents from inside a chat.
    The question and the assistant's answer are posted into the shared thread
    so both members see them.
+4. You can also `@mention` a converted file (e.g. `@report.pdf`) to scope the
+   assistant's search to that specific document. An autocomplete dropdown
+   suggests matching files as you type.
 4. Each conversation shows the peer's **full email**, a **Member / Pending**
    badge (whether they have signed up), and the last message preview.
 
@@ -106,6 +111,7 @@ The interface is displayed at 75% scale to match the Aperture console design.
   non-WAV formats) and video frame sampling
 - **vLLM** is Linux/CUDA only; on macOS the audio and video pipelines fall back to
   HuggingFace Transformers for Whisper inference
+- `extract-msg` for `.msg` (Outlook) parsing; `.eml` uses the Python stdlib `email` module
 
 Docling and PyTorch can consume significant memory. On an 8 GB computer,
 conversion may fail while loading the table model if other applications leave
@@ -207,9 +213,10 @@ doc_<id>.umr.md
 | Office/document | `.docx`, `.xlsx`, `.html`, `.tex`, `.epub` | Docling |
 | Presentation | `.pptx` | `python-pptx` |
 | Text | `.txt`, `.md`, `.csv`, `.tsv`, `.rtf`, `.ipynb`, source files | Direct extraction |
-| Image | `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.bmp`, `.tif`, `.tiff` | Fireworks vision |
+| Image | `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.bmp`, `.tif`, `.tiff`, `.avif`, `.heic`, `.heif` | Fireworks vision |
 | Audio | `.mp3`, `.wav`, `.m4a`, `.flac`, `.ogg`, `.aac`, `.wma` | vLLM Whisper + pyannote diarization |
 | Video | `.mp4`, `.avi`, `.mov`, `.webm`, `.mkv`, `.flv`, `.wmv`, `.m4v` | ffmpeg audio + frame sampling + Whisper + Florence-2 |
+| Email | `.eml`, `.msg` | MIME / Outlook parser, chunked as text |
 
 Legacy `.doc`, `.ppt`, and `.xls` files are recognized but rejected because
 they are not safely convertible by the current routes.

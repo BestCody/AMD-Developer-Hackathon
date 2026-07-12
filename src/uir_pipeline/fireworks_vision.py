@@ -55,6 +55,7 @@ _DETAILED_DESCRIPTION_PROMPT: Final[str] = (
 
 _SUPPORTED_EXTENSIONS: Final[frozenset[str]] = frozenset({
     "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp",
+    "avif", "heic", "heif",
 })
 
 

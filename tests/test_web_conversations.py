@@ -166,14 +166,14 @@ class TestMessaging:
 
         import uir_pipeline.chat as chat_mod
         seen = {}
-        monkeypatch.setattr(chat_mod, "retrieve",
-                            lambda paths, message: (seen.update(message=message) or [{"doc_title": "p", "page": 1, "text": "...", "score": 0.9}]))
-        monkeypatch.setattr(chat_mod, "answer",
-                            lambda message, contexts, history=None, **kw: {
-                                "success": True, "answer": "Attention weighs tokens.",
-                                "citations": contexts, "cited": contexts,
-                                "invalid_citations": [], "grounded": True, "model": "stub",
-                                "tool_steps": []})
+        monkeypatch.setattr(chat_mod, "retrieve", lambda *a, **kw: [])
+        def _fake_answer(message, contexts, history=None, **kw):
+            seen["message"] = message
+            return {"success": True, "answer": "Attention weighs tokens.",
+                    "citations": contexts, "cited": contexts,
+                    "invalid_citations": [], "grounded": True, "model": "stub",
+                    "tool_steps": []}
+        monkeypatch.setattr(chat_mod, "answer", _fake_answer)
         _seed_done_job(alice)
 
         resp = alice.post(f"/api/conversations/{cid}/messages", json={"text": "@fireworks what is attention"})

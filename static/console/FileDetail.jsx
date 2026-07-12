@@ -42,6 +42,7 @@ const EXT_ICON = {
   epub: "book", html: "globe", htm: "globe",
   png: "image", jpg: "image", jpeg: "image", gif: "image",
   webp: "image", bmp: "image", tiff: "image", tif: "image",
+  avif: "image", heic: "image", heif: "image",
   mp4: "clapperboard", avi: "clapperboard", mov: "clapperboard",
   webm: "clapperboard", mkv: "clapperboard", flv: "clapperboard",
   wmv: "clapperboard", m4v: "clapperboard",
@@ -50,6 +51,7 @@ const EXT_ICON = {
   txt: "file-code", md: "file-code", py: "file-code", js: "file-code",
   jsx: "file-code", ts: "file-code", tsx: "file-code", json: "file-code",
   xml: "file-code", ipynb: "notebook-text",
+  eml: "mail", msg: "mail",
 };
 
 function extOf(name) {

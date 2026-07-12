@@ -117,3 +117,7 @@ pyannote.audio>=3.1,<4
 # pydub: audio metadata extraction (duration, sample rate, channels).
 # Requires ffmpeg installed on the host system PATH.
 pydub>=0.25,<1
+
+# --- Email pipeline ---
+# extract-msg: Outlook .msg parsing (Python email module handles .eml natively).
+extract-msg>=0.50

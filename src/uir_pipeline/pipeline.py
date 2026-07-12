@@ -300,6 +300,11 @@ def _run_text_route(path: Path, fmt: str) -> tuple[list[Any], list[tuple[int, st
         _doc, page_pairs = ingest_rtf(path)
     elif fmt_upper == "IPYNB":
         page_pairs = paginate_pageless(_notebook_to_text(path))
+    elif fmt_upper in ("EML", "MSG"):
+        from uir_pipeline.email_pipeline import extract_email
+
+        extracted = extract_email(path)
+        page_pairs = paginate_pageless(extracted["text"])
     else:
         page_pairs = paginate_pageless(_read_text_file(path))
 
@@ -959,6 +964,25 @@ def run(
         source, metadata = doc.to_uir_source_metadata()
         # Override the page_count to match what ingest saw.
         metadata = metadata.model_copy(update={"page_count": doc.page_count})
+
+        # Add email metadata (subject, from, to, date) when the format is EML/MSG.
+        if fmt.upper() in ("EML", "MSG"):
+            from uir_pipeline.email_pipeline import extract_email
+            try:
+                extracted = extract_email(p)
+                email_meta = extracted.get("metadata") or {}
+                metadata = metadata.model_copy(update={
+                    "modal_features": {
+                        "email": {
+                            "subject": email_meta.get("subject", ""),
+                            "from": email_meta.get("from", ""),
+                            "to": email_meta.get("to", ""),
+                            "date": email_meta.get("date", ""),
+                        }
+                    }
+                })
+            except Exception as exc:
+                logger.warning("email metadata extraction failed for %s: %s", p.name, exc)
 
         # Build chunk nodes
         chunk_nodes: list[ChunkNode] = []

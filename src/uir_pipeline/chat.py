@@ -93,9 +93,10 @@ _SYSTEM_PROMPT: Final[str] = (
 #: more passages before answering.
 _SYSTEM_PROMPT_TOOLS: Final[str] = (
     "You answer questions about the user's documents using ONLY the "
-    "numbered context passages provided -- including any you fetch yourself "
-    "via the tools.\n\n"
+    "numbered context passages you retrieve via tools.\n\n"
     "Rules:\n"
+    "- You MUST call `search` or `get_more_sources` to find relevant passages "
+    "before answering. No passages are pre-loaded for you.\n"
     "- Ground every claim in a passage and cite it inline as [1], [2], etc. "
     "The numbers continue across tool results, so a passage a tool returned "
     "as [7] is cited as [7].\n"
@@ -104,7 +105,7 @@ _SYSTEM_PROMPT_TOOLS: Final[str] = (
     "Do not guess, and do not fall back on general knowledge.\n"
     "- Never invent a citation number that wasn't given to you.\n"
     "- Be concise and factual. Quote figures and names exactly as written.\n"
-    "- Call `search` to find passages the initial context didn't surface, or "
+    "- Call `search` to find passages relevant to the question, or "
     "`get_more_sources` to broaden coverage. Then answer with [n] citations."
 )
 
@@ -536,14 +537,17 @@ def answer(
         return _finalize(msg.get("content", ""), contexts, [], resolved_model, usage)
 
     # ---- agentic tool-calling loop -----------------------------------------
+    # Filter docs by job_ids if specific files were @mentioned.
+    if job_ids and docs:
+        docs = [d for d in docs if d.get("job_id") in job_ids]
     gathered = list(contexts)
     tool_steps: list[dict[str, Any]] = []
-    initial_block = _format_context_block(gathered) if gathered else "(no initial passages)"
+    initial_block = _format_context_block(gathered) if gathered else "(no initial passages provided -- you must use tools to find them)"
     user_content = (
         f"Context passages:\n\n{initial_block}\n\nQuestion: {query}\n\n"
-        "If the passages above are insufficient, call `search` or "
-        "`get_more_sources` to find more before answering. Cite every claim "
-        "as [n] using the passage numbers above and in tool results."
+        "You must call `search` or `get_more_sources` to find relevant passages "
+        "before answering. Cite every claim as [n] using the passage numbers "
+        "in tool results."
     )
     messages = [
         {"role": "system", "content": _SYSTEM_PROMPT_TOOLS}, *hist_msgs,

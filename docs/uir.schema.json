@@ -222,6 +222,15 @@
           "default": null,
           "description": "Mirror of ``Source.format`` for convenience. None when the UIR was emitted by pre-\u00a717 code paths (legacy PDFs only).",
           "title": "Format"
+        },
+        "modal_features": {
+          "additionalProperties": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "description": "Free-form per-modality metadata.  Audio/video/email pipelines store duration, resolution, sender etc. here without schema churn.",
+          "title": "Modal Features",
+          "type": "object"
         }
       },
       "required": [

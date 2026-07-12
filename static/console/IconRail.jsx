@@ -14,7 +14,11 @@ function IconRail({ active, onChange, user, onLogout, onOpenSearch }) {
   const items = [
     { id: "upload", label: "Upload", icon: "upload-cloud" },
     { id: "fireworks", label: "Fireworks", icon: "sparkles" },
+    { id: "chats", label: "Chats", icon: "message-circle" },
   ];
+
+  const [accountOpen, setAccountOpen] = React.useState(false);
+  const accountRef = React.useRef(null);
 
   const initial = ((user && (user.name || user.email)) || "?").trim().charAt(0).toUpperCase();
 
@@ -96,38 +100,57 @@ function IconRail({ active, onChange, user, onLogout, onOpenSearch }) {
 
       <div style={{ flex: 1 }} />
 
-      {/* The profile avatar opens the Chats panel, matching the design kit's
-          "Chats -- tapped from the profile avatar". It doubles as the active
-          indicator for that tab. */}
-      <button
-        onClick={() => onChange("chats")}
-        aria-label="Chats"
-        aria-current={active === "chats"}
-        title={user ? `${user.email} -- Chats` : "Chats"}
-        style={{
-          width: 40, height: 40, borderRadius: "50%",
-          background: active === "chats" ? "var(--accent-primary)" : "var(--gray-700)",
-          color: "var(--white)", border: active === "chats" ? "2px solid var(--on-accent)" : "2px solid transparent",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          fontSize: 14, fontWeight: 600, marginBottom: 4, cursor: "pointer",
-          transition: "background var(--duration-fast) ease, transform var(--duration-press) var(--ease-standard)",
-        }}
-        onMouseDown={(e) => (e.currentTarget.style.transform = "scale(var(--scale-press))")}
-        onMouseUp={(e) => (e.currentTarget.style.transform = "scale(1)")}
-        onMouseLeave={(e) => (e.currentTarget.style.transform = "scale(1)")}
-      >
-        {initial}
-      </button>
-      <button
-        onClick={onLogout}
-        style={{
-          border: "none", background: "transparent", cursor: "pointer",
-          color: "var(--text-muted-on-dark)", fontSize: 11,
-          fontFamily: "var(--font-text)",
-        }}
-      >
-        Sign out
-      </button>
+      {/* Account dropdown: avatar button opens a small menu with user info + sign out. */}
+      <div style={{ position: "relative" }} ref={accountRef}>
+        <button
+          onClick={() => setAccountOpen((v) => !v)}
+          aria-label="Account"
+          aria-haspopup="menu"
+          aria-expanded={accountOpen}
+          title={user ? user.email : "Account"}
+          style={{
+            width: 40, height: 40, borderRadius: "50%",
+            background: accountOpen ? "var(--accent-primary)" : "var(--gray-700)",
+            color: "var(--white)", border: "2px solid transparent",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            fontSize: 14, fontWeight: 600, marginBottom: 4, cursor: "pointer",
+            transition: "background var(--duration-fast) ease, transform var(--duration-press) var(--ease-standard)",
+          }}
+          onMouseDown={(e) => (e.currentTarget.style.transform = "scale(var(--scale-press))")}
+          onMouseUp={(e) => (e.currentTarget.style.transform = "scale(1)")}
+          onMouseLeave={(e) => (e.currentTarget.style.transform = "scale(1)")}
+        >
+          {initial}
+        </button>
+        {accountOpen && (
+          <div style={{
+            position: "absolute", bottom: "calc(100% + 6px)", left: 0, width: 180,
+            background: "var(--surface-canvas)", border: "1px solid var(--border-hairline)",
+            borderRadius: "var(--radius-sm)", boxShadow: "var(--shadow-ring)", zIndex: 20,
+            padding: "10px 0",
+            fontFamily: "var(--font-text)",
+          }}>
+            <div style={{ padding: "0 14px 8px", fontSize: 12, color: "var(--text-muted-48)", borderBottom: "1px solid var(--border-hairline)" }}>
+              <div style={{ fontWeight: 600, color: "var(--text-ink)", fontSize: 13, marginBottom: 2 }}>
+                {user && (user.name || user.email) ? (user.name || user.email) : "Account"}
+              </div>
+              {user && user.email && <div>{user.email}</div>}
+            </div>
+            <button
+              onClick={() => { setAccountOpen(false); onLogout(); }}
+              style={{
+                width: "100%", padding: "8px 14px", border: "none", background: "transparent",
+                cursor: "pointer", color: "var(--status-error)", fontSize: 13,
+                fontFamily: "var(--font-text)", textAlign: "left",
+                display: "flex", alignItems: "center", gap: 8,
+              }}
+            >
+              <window.LucideIcon name="log-out" size={14} />
+              Sign out
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

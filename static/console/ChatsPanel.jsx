@@ -140,13 +140,19 @@ function Message({ m, myEmail }) {
   );
 }
 
-function ChatsPanel({ user }) {
+function ChatsPanel({ user, files }) {
   const myEmail = ((user && user.email) || "").toLowerCase();
   const API = window.MonadLabsAPI;
 
   const [conversations, setConversations] = React.useState(null); // null = loading
   const [listError, setListError] = React.useState("");
   const [search, setSearch] = React.useState("");
+
+  // @mention file autocomplete state
+  const [mentionDrop, setMentionDrop] = React.useState(false);
+  const [mentionQuery, setMentionQuery] = React.useState("");
+  const mentionRef = React.useRef(null);
+  const convertedFiles = (files || []).filter((f) => f.status === "done" && f.job);
 
   const [showNew, setShowNew] = React.useState(false);
   const [newEmail, setNewEmail] = React.useState("");
@@ -417,7 +423,7 @@ function ChatsPanel({ user }) {
         </div>
 
         <div style={{ padding: "0 8px 28px", display: "flex", gap: 10, alignItems: "center" }}>
-          <div style={{ position: "relative", flex: 1 }}>
+          <div style={{ position: "relative", flex: 1 }} ref={mentionRef}>
             <input
               ref={msgInputRef}
               value={draft}
@@ -425,7 +431,18 @@ function ChatsPanel({ user }) {
                 const v = e.target.value;
                 setDraft(v);
                 const t = v.trimStart();
-                setCmdDrop(t.startsWith("@") && (t === "@" || t[1] !== " "));
+                const isFireworks = /^\s*@fireworks\b/.test(v);
+                setCmdDrop(t.startsWith("@") && (t === "@" || t[1] !== " ") && !isFireworks);
+                // File mention autocomplete: @filename anywhere in the text
+                const lastAt = v.lastIndexOf("@");
+                if (lastAt >= 0 && !/\s/.test(v.slice(lastAt + 1))) {
+                  const q = v.slice(lastAt + 1).toLowerCase();
+                  setMentionQuery(q);
+                  setMentionDrop(q.length > 0);
+                } else {
+                  setMentionDrop(false);
+                  setMentionQuery("");
+                }
               }}
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
               placeholder={FIREWORKS_HINT}
@@ -452,6 +469,43 @@ function ChatsPanel({ user }) {
                   <span style={{ fontWeight: 600 }}>@fireworks</span>
                   <span style={{ color: "var(--text-muted-48)", fontSize: "var(--text-caption-size)" }}>Ask your documents</span>
                 </button>
+              </div>
+            )}
+            {mentionDrop && (
+              <div style={{
+                position: "absolute", bottom: "calc(100% + 4px)", left: 0, right: 0, maxHeight: 200, overflow: "auto",
+                background: "var(--surface-canvas)", border: "1px solid var(--border-hairline)",
+                borderRadius: "var(--radius-sm)", boxShadow: "var(--shadow-ring)", zIndex: 10,
+              }}>
+                {convertedFiles.filter((f) => f.name.toLowerCase().includes(mentionQuery.toLowerCase())).slice(0, 8).map((f) => (
+                  <button
+                    key={f.id}
+                    onClick={() => {
+                      const lastAt = draft.lastIndexOf("@");
+                      const nextDraft = draft.slice(0, lastAt) + "@" + f.name + " " + draft.slice(lastAt + 1 + mentionQuery.length);
+                      setDraft(nextDraft);
+                      setMentionDrop(false);
+                      setMentionQuery("");
+                      setTimeout(() => msgInputRef.current && msgInputRef.current.focus(), 0);
+                    }}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "10px 14px",
+                      border: "none", background: "transparent", cursor: "pointer", textAlign: "left",
+                      fontFamily: "var(--font-text)", fontSize: "var(--text-body-size)", color: "var(--text-ink)",
+                      borderBottom: "1px solid var(--border-hairline)",
+                    }}
+                    onMouseEnter={(e) => e.currentTarget.style.background = "var(--surface-parchment)"}
+                    onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
+                  >
+                    <window.LucideIcon name="file-text" size={14} style={{ color: "var(--text-muted-48)" }} />
+                    <span style={{ fontWeight: 600 }}>@{f.name}</span>
+                  </button>
+                ))}
+                {convertedFiles.filter((f) => f.name.toLowerCase().includes(mentionQuery.toLowerCase())).length === 0 && (
+                  <div style={{ padding: "10px 14px", color: "var(--text-muted-48)", fontSize: "var(--text-caption-size)" }}>
+                    No matching files.
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -489,7 +543,7 @@ function ChatsPanel({ user }) {
           <window.LucideIcon name="plus" size={20} />
         </button>
         <div style={{ flex: 1, position: "relative", display: "flex", alignItems: "center" }}>
-          <window.LucideIcon name="search" size={16} style={{ position: "absolute", left: 14, color: "var(--text-muted-48)" }} />
+          <window.LucideIcon name="search" size={16} style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted-48)", pointerEvents: "none" }} />
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}

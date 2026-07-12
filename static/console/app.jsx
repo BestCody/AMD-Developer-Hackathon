@@ -254,7 +254,7 @@ function App() {
         />
       )}
       {tab === "fireworks" && <FireworksChat files={files} />}
-      {tab === "chats" && <ChatsPanel user={user} />}
+      {tab === "chats" && <ChatsPanel user={user} files={files} />}
       <GlobalSearch open={searchOpen} onClose={() => setSearchOpen(false)} onOpenDocument={openDocument} />
     </div>
   );
