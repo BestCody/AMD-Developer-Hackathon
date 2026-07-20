@@ -325,6 +325,7 @@ def chunk_text(
     section_path: str | None = None,
     is_section_first: bool = False,
     is_section_last: bool = False,
+    confidence: float = 1.0,
 ) -> list[ChunkDraft]:
     """Split ``text`` into paragraph-aware token-bounded ``ChunkDraft``s.
 
@@ -399,7 +400,7 @@ def chunk_text(
             token_count=count_tokens(seg, model_id),
             page=page,
             bbox=page_bbox,
-            confidence=1.0,
+            confidence=confidence,
             modal_features=modal_features,
         ))
     return drafts
