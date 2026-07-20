@@ -419,11 +419,12 @@ def _docling_to_table_draft(t: dict[str, Any]) -> Any:
     markdown: pipes_count-1 on the first non-separator row for cols;
     count of non-separator ``|``-led lines for rows. The
     :attr:`TableDraft.confidence` field carries the per-table confidence
-    computed in :func:`docling_extract._walk_doc` (``0.9`` default for a
-    clean born-digital table; lowered to ``0.6`` for OCR-derived tables and
-    ``0.4`` when the markdown fails structural sanity). It is threaded
-    through to ``ChunkNode.confidence`` so retrieval ranking can down-weight
-    unverified tables.
+    computed in :func:`docling_extract._walk_doc`: ``1.0`` for a clean
+    born-digital table, lowered to ``0.6`` for OCR-derived tables and
+    ``0.4`` when the markdown fails structural sanity. (The ``0.9``
+    fallback below is only for callers that build a table dict without a
+    ``confidence`` key.) It is threaded through to ``ChunkNode.confidence``
+    so downstream consumers (e.g. retrieval ranking, a UI flag) can read it.
     """
     from uir_pipeline.tables import TableDraft
     md = t["markdown"]

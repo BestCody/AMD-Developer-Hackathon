@@ -76,15 +76,6 @@ _DECORATIVE_LABELS: Final[frozenset[str]] = frozenset({
     "page_furniture", "furniture", "page_background", "overlay",
 })
 
-# Relative priority used only by the overlap backstop: when two regions
-# overlap heavily we keep the higher-priority one and treat the other as the
-# decorative overlay. ``table`` outranks prose so an invoice stamp sitting
-# on a table is dropped, not the table.
-_LABEL_PRIORITY: Final[dict[str, int]] = {
-    "heading": 3, "list": 2, "paragraph": 2, "figure": 2,
-    "caption": 2, "table": 4, "code": 2,
-}
-
 # Two regions are considered an overlay/decorative pair once the SMALLER
 # bbox is covered by the other by at least this fraction. 0.6 sits well
 # above normal inter-paragraph adjacency (paragraphs are stacked, never
@@ -368,7 +359,6 @@ _WATERMARK_RE: Final[re.Pattern[str]] = re.compile(
     r"|internal[\s\-]*use[\s\-]*only"
     r"|for[\s\-]*internal[\s\-]*use"
     r"|sample[\s\-]*copy"
-    r"|watermark"
     r")",
     re.IGNORECASE,
 )
@@ -584,7 +574,10 @@ def _env_flag(name: str) -> bool:
 # born-digital table read straight from a text layer. This is the first
 # value that actually populates ChunkNode.confidence below 1.0 for tables
 # (see :func:`pipeline._docling_to_table_draft` -> :func:`chunk.chunk_text`
-# -> ``ChunkNode``), where retrieval ranking already consumes it.
+# -> ``ChunkNode``), exposing it on ChunkNode so downstream consumers such
+# as retrieval ranking or a UI confidence flag can read/down-weight it.
+# NOTE: retrieval ranking does not yet *read* this field -- wiring that in
+# is a separate change (see PR discussion).
 OCR_TABLE_CONFIDENCE: Final[float] = 0.6
 
 # Below this confidence a table is flagged "unverified": the structural
@@ -714,9 +707,10 @@ def _filter_decorative_by_overlap(
     the opposite of a naive "drop the smaller box" rule which would delete
     body text under a full-page stamp.
 
-    Priorities (:data:`_LABEL_PRIORITY`) are intentionally NOT used to pick
-    the survivor here; overlap-count alone is enough and avoids dropping a
-    large but legitimate table that happens to sit near two captions.
+    We pick the survivor purely by overlap-count (no label priority table):
+    that avoids dropping a large but legitimate table that happens to sit
+    near two captions, and keeps the implementation free of a priority
+    ordering that would need maintaining.
     """
     if len(page_regions) < 2:
         return list(page_regions)
@@ -883,7 +877,7 @@ def _walk_doc(doc: Any, *, ocr_applied: bool = False) -> DoclingResult:
                 # Tables were already emitted in the first pass; skip
                 # emission here to avoid duplicating with `tables`.
                 continue
-            if not text and label_raw in ("heading", "paragraph", "list_item"):
+            if not text and label_raw in ("heading", "paragraph", "list"):
                 # Empty headings/paragraphs are noise.
                 continue
             region = {

@@ -2,8 +2,10 @@
 
 These are intentionally *broken* documents that reproduce the two extraction
 bugs, so they double as regression fixtures. They are generated with reportlab
-(+ PIL for the rasterized scan) and committed under tests/fixtures/sample_pdfs
-so the pipeline can be re-run against them after a fix.
+(+ PIL for the rasterized scan) and written under tests/fixtures/sample_pdfs
+(those PDFs are gitignored by design, so they are regenerated locally rather
+than committed). The guarded end-to-end tests in tests/test_docling_extract.py
+re-run the pipeline against them after a fix.
 
     tests/fixtures/sample_pdfs/01_messy_multicolumn_report.pdf
         Two-column body text with a large, rotated, semi-transparent
@@ -16,6 +18,12 @@ so the pipeline can be re-run against them after a fix.
         table (no embedded text layer). Reproduces Bug 1: pypdfium
         finds ~0 glyphs, so the pipeline routes it through OCR, and
         the OCR'd table's UNIT/EXT columns arrive mis-aligned.
+
+NOTE: these PDFs are NOT committed -- ``tests/fixtures/sample_pdfs/*`` is
+gitignored by design (see ``.gitignore``, "Real PDFs ... pulled separately
+per fixture"). This script regenerates them locally so the guarded
+end-to-end tests in ``tests/test_docling_extract.py`` have something to run
+against; without the PDFs those tests skip gracefully.
 
 Run:  python3 scripts/generate_issue_fixtures.py
 """

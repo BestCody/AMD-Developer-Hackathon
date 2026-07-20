@@ -562,6 +562,21 @@ def test_decorative_raw_label_is_dropped():
     assert "DRAFT - DO NOT DISTRIBUTE" not in texts
 
 
+def test_empty_list_region_is_dropped():
+    """Regression: _LABEL_MAP normalizes both "list_item" and "list" to the
+    canonical "list", so the empty-text noise filter must check "list" (not
+    the raw "list_item") or empty list regions leak into the stream."""
+    from uir_pipeline.docling_extract import _walk_doc
+    page = _FakePage(page_no=1, items=[
+        _FakeItem("list_item", "", page=1, bbox=(50, 50, 300, 200)),
+        _FakeItem("list_item", "A real bullet", page=1, bbox=(50, 260, 300, 360)),
+    ])
+    doc = _FakeDocument(tables=[], pages=[page])
+    result = _walk_doc(doc)
+    assert len(result.regions) == 1
+    assert result.regions[0]["text"] == "A real bullet"
+
+
 def test_overlap_stamp_dropped_body_kept():
     """Label-independent backstop: a large rotated "DRAFT" stamp that
     Docling mislabeled as "paragraph" (so it escapes the label discard)
