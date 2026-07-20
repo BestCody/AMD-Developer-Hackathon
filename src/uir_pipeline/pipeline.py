@@ -418,9 +418,13 @@ def _docling_to_table_draft(t: dict[str, Any]) -> Any:
     and :attr:`TableDraft.col_count` are derived from the rendered
     markdown: pipes_count-1 on the first non-separator row for cols;
     count of non-separator ``|``-led lines for rows. The
-    :attr:`TableDraft.confidence` field is a static ``0.9`` because the
-    standard ``DocumentConverter`` output doesn't expose a per-region
-    logprob -- downstream consumers can apply their own threshold.
+    :attr:`TableDraft.confidence` field carries the per-table confidence
+    computed in :func:`docling_extract._walk_doc`: ``1.0`` for a clean
+    born-digital table, lowered to ``0.6`` for OCR-derived tables and
+    ``0.4`` when the markdown fails structural sanity. (The ``0.9``
+    fallback below is only for callers that build a table dict without a
+    ``confidence`` key.) It is threaded through to ``ChunkNode.confidence``
+    so downstream consumers (e.g. retrieval ranking, a UI flag) can read it.
     """
     from uir_pipeline.tables import TableDraft
     md = t["markdown"]
@@ -436,7 +440,9 @@ def _docling_to_table_draft(t: dict[str, Any]) -> Any:
         markdown=md,
         row_count=row_count,
         col_count=col_count,
-        confidence=0.9,
+        # Back-compat default 0.9 for callers that build a table dict
+        # without a ``confidence`` key.
+        confidence=float(t.get("confidence", 0.9)),
     )
 
 
@@ -895,6 +901,7 @@ def run(
                 page=table.page_number,
                 bbox=table.bbox,
                 region_kind="table",
+                confidence=table.confidence,
             ))
         all_chunks.extend(figure_chunk_shims)  # Tier 3 captions get BGE vectors
         # Drop residual 1-3 char noise chunks (Fix Plan item #4). These

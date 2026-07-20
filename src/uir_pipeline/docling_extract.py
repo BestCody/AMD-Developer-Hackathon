@@ -60,6 +60,28 @@ _LABEL_MAP: dict[str, str] = {
     "code": "paragraph",
 }
 
+# Raw (unmapped) Docling labels that denote page furniture / decorative
+# artifacts rather than body content. Issue #: a rotated, semi-transparent
+# "DRAFT - DO NOT DISTRIBUTE" stamp was falling through :func:`_label_of`'s
+# ``"paragraph"`` fallback and entering the chunk stream. Docling may label
+# such items with a furniture-y name, or (more often) mislabel them as
+# ``"text"``/``"paragraph"`` -- so this set is the *first* guard, and the
+# label-independent bbox-overlap heuristic (see
+# :func:`_filter_decorative_by_overlap`) is the backstop for the mislabelled
+# case. We deliberately do NOT map these to a canonical label (which would
+# break the downstream ``LayoutLabel`` enum in pipeline.py); we drop them
+# entirely from the emitted region stream.
+_DECORATIVE_LABELS: Final[frozenset[str]] = frozenset({
+    "watermark", "stamp", "decorative", "decoration", "background",
+    "page_furniture", "furniture", "page_background", "overlay",
+})
+
+# Two regions are considered an overlay/decorative pair once the SMALLER
+# bbox is covered by the other by at least this fraction. 0.6 sits well
+# above normal inter-paragraph adjacency (paragraphs are stacked, never
+# overlapping) but below a stamp that genuinely sits on top of body text.
+_OVERLAP_DROP_FRACTION: Final[float] = 0.6
+
 
 @dataclass
 class DoclingResult:
@@ -303,6 +325,60 @@ def _label_of(item: Any) -> str:
     return _LABEL_MAP.get(key, "paragraph")
 
 
+def _raw_label_of(item: Any) -> str | None:
+    """Return Docling's raw item label (unmapped), or ``None``.
+
+    Unlike :func:`_label_of` this does NOT run the label through
+    ``_LABEL_MAP``. We need the *raw* name to recognise page-furniture /
+    decorative items (``"watermark"``, ``"stamp"`` ...) before they fall
+    through to the ``"paragraph"`` default and pollute the chunk stream.
+    """
+    for attr in ("label_name", "label"):
+        v = getattr(item, attr, None)
+        if v is not None:
+            return str(v).lower().strip()
+    return None
+
+
+# Lexical watermark signatures. Docling's layout model frequently *fuses* a
+# rotated / semi-transparent stamp into the nearest body paragraph's text
+# (observed on 01_messy_multicolumn_report.pdf: "DRAFT - DO NOT
+# DISTRIBUTE" lands inside a paragraph region, not as a separate item), so
+# neither a label discard nor a bbox-overlap rule can isolate it. This
+# content-based net is the label-independent backstop for that case. We match
+# whole watermark *phrases* only -- unambiguous stamp strings -- so ordinary
+# prose is never touched. Bare words like "confidential" / "preliminary" /
+# "copyright" are deliberately EXCLUDED: "the confidential review" or
+# "Copyright 2024" are legitimate and must survive.
+_WATERMARK_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:"
+    r"draft[\s\-]*[-:—]?[\s\-]*do[\s\-]*not[\s\-]*distribute"
+    r"|do[\s\-]*not[\s\-]*distribute"
+    r"|do[\s\-]*not[\s\-]*circulate"
+    r"|not[\s\-]*for[\s\-]*distribution"
+    r"|internal[\s\-]*use[\s\-]*only"
+    r"|for[\s\-]*internal[\s\-]*use"
+    r"|sample[\s\-]*copy"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _strip_watermark_text(text: str) -> str:
+    """Remove watermark / stamp phrases fused into ``text``.
+
+    Returns the text with any matched watermark signature replaced by a single
+    space and the result whitespace-collapsed. A region that was *purely* a
+    stamp collapses to ``""`` and is dropped by the caller's empty-text
+    guard; a region that merely *contained* the stamp keeps its (real) body
+    text. Idempotent on stamp-free text.
+    """
+    if not text:
+        return text
+    stripped = _WATERMARK_RE.sub(" ", text)
+    return re.sub(r"\s+", " ", stripped).strip()
+
+
 #: A decimal point that PDF glyph extraction split apart: ``28 . 4``, ``0 . 1``.
 #: The whitespace *before* the dot is the signature -- prose never puts a space
 #: there, so this cannot rejoin a sentence boundary like ``"...in 2017. 5 of
@@ -412,11 +488,17 @@ def extract_with_docling(
     """
     pdf_path = Path(pdf_path).expanduser()
     if converter is not None:
+        # Injected converter bypasses OCR resolution entirely, so we cannot
+        # know whether it ran OCR. Tests of the OCR-confidence path call
+        # :func:`_walk_doc` directly with ``ocr_applied=True``.
         return _walk_doc(_convert_checked(converter, pdf_path))
 
     mode = _resolve_ocr()
     if mode == "on":
-        return _walk_doc(_convert_checked(_build_converter(ocr=True), pdf_path))
+        return _walk_doc(
+            _convert_checked(_build_converter(ocr=True), pdf_path),
+            ocr_applied=True,
+        )
 
     doc = _convert_checked(_build_converter(ocr=False), pdf_path)
     if mode == "off" or not _looks_scanned(doc):
@@ -429,7 +511,10 @@ def extract_with_docling(
         "OCR enabled (set DOCLING_OCR=off to skip).",
         pdf_path, _text_char_count(doc), _page_count(doc),
     )
-    return _walk_doc(_convert_checked(_build_converter(ocr=True), pdf_path))
+    return _walk_doc(
+        _convert_checked(_build_converter(ocr=True), pdf_path),
+        ocr_applied=True,
+    )
 
 
 def _assert_conversion_complete(result: Any, pdf_path: Path) -> None:
@@ -483,7 +568,180 @@ def _env_flag(name: str) -> bool:
     return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _walk_doc(doc: Any) -> DoclingResult:
+# Confidence floor for tables emitted from a page that went through the
+# OCR path. OCR'd tables are machine-read from page images, so column
+# binding and glyph recognition are materially less trustworthy than a
+# born-digital table read straight from a text layer. This is the first
+# value that actually populates ChunkNode.confidence below 1.0 for tables
+# (see :func:`pipeline._docling_to_table_draft` -> :func:`chunk.chunk_text`
+# -> ``ChunkNode``), exposing it on ChunkNode so downstream consumers such
+# as retrieval ranking or a UI confidence flag can read/down-weight it.
+# NOTE: retrieval ranking does not yet *read* this field -- wiring that in
+# is a separate change (see PR discussion).
+OCR_TABLE_CONFIDENCE: Final[float] = 0.6
+
+# Below this confidence a table is flagged "unverified": the structural
+# sanity check (column-count / numeric-column) drops it further when the
+# markdown looks internally inconsistent -- i.e. Docling mis-bound the rows
+# (the 02_scan_simulated_invoice.pdf symptom: UNIT/EXT shift up one row).
+SANITY_FAIL_CONFIDENCE: Final[float] = 0.4
+
+# Header-cell hint that a column carries numeric / currency data. A header
+# matching this whose data rows are mostly empty / non-numeric is the
+# signature of a row-binding shift.
+_NUMERIC_HEADER_RE: Final[re.Pattern[str]] = re.compile(
+    r"[\$€£%]|num|amt|amount|price|cost|qty|quantity|ext|total|unit",
+    re.IGNORECASE,
+)
+# A cell is numeric if it is (optionally signed, optionally currency-prefixed,
+# optionally thousands-separated) digits with an optional decimal part.
+_NUMERIC_CELL_RE: Final[re.Pattern[str]] = re.compile(
+    r"^-?[\$€£]?[\d,]*\.?\d+$"
+)
+
+
+def _table_markdown_sanity(md: str) -> tuple[bool, list[str]]:
+    """Inspect a GFM table for internally-inconsistent structure.
+
+    Returns ``(ok, reasons)``. ``ok`` is ``False`` when the markdown
+    shows signs Docling mis-bound it:
+
+    * data rows disagree with the header on column count, or
+    * a header column that looks numeric/currency has mostly empty or
+      non-numeric cells -- the classic row-shift signature.
+
+    ``md`` is Docling's ``export_to_markdown`` output: a ``|``-separated
+    GFM table with a ``|---|`` separator row. Empty / non-table input is
+    reported ``ok`` (nothing to judge) so callers never penalise a blank.
+    """
+    reasons: list[str] = []
+    header: list[str] = []
+    data_rows: list[list[str]] = []
+    for line in md.splitlines():
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        if "---" in line:
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if not header:
+            header = cells
+            continue
+        data_rows.append(cells)
+
+    if not header or not data_rows:
+        return (True, [])
+
+    # (1) Column-count consistency across data rows vs. the header row.
+    header_cols = len(header)
+    ragged = [r for r in data_rows if len(r) != header_cols]
+    if ragged:
+        n_cols = len(ragged[0])
+        reasons.append(
+            f"{len(ragged)}/{len(data_rows)} data row(s) have {n_cols} "
+            f"cols vs header's {header_cols}"
+        )
+
+    # (2) Numeric/currency header column with mostly empty / non-numeric
+    #     cells -- i.e. the column was bound to the wrong rows.
+    for ci, h in enumerate(header):
+        if not _NUMERIC_HEADER_RE.search(h):
+            continue
+        non_numeric = 0
+        for r in data_rows:
+            cell = r[ci] if ci < len(r) else ""
+            if cell == "" or not _NUMERIC_CELL_RE.match(cell):
+                non_numeric += 1
+        if data_rows and non_numeric / len(data_rows) >= 0.5:
+            reasons.append(
+                f"header {h!r} (col {ci}) looks numeric/currency but "
+                f"{non_numeric}/{len(data_rows)} cells are empty/non-numeric"
+            )
+
+    return (not reasons, reasons)
+
+
+def _overlap_fraction(
+    a: tuple[int, int, int, int], b: tuple[int, int, int, int],
+) -> float:
+    """Fraction of the SMALLER bbox covered by the ``a``/``b`` intersection.
+
+    Returns ``0.0`` when the pair is disjoint or either box is degenerate
+    (zero area, e.g. the ``(0, 0, 0, 0)`` placeholder when provenance
+    is missing). Axis-aligned boxes, so a plain interval intersection on
+    each axis suffices.
+    """
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    if ax1 >= ax2 or ay1 >= ay2 or bx1 >= bx2 or by1 >= by2:
+        return 0.0
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    if inter <= 0:
+        return 0.0
+    area_a = (ax2 - ax1) * (ay2 - ay1)
+    area_b = (bx2 - bx1) * (by2 - by1)
+    smaller = min(area_a, area_b)
+    if smaller <= 0:
+        return 0.0
+    return inter / smaller
+
+
+def _filter_decorative_by_overlap(
+    page_regions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop decorative overlays from a single page's region list.
+
+    A genuine body paragraph overlaps at most its neighbours (which, being
+    stacked, it does NOT overlap at all). A decorative stamp/"DRAFT" watermark
+    is ROTATED / semi-transparent and physically sits ON TOP of several body
+    paragraphs -- so it overlaps MANY regions while each body paragraph
+    overlaps only the stamp. We therefore drop any region that overlaps at
+    least two others by :data:`_OVERLAP_DROP_FRACTION` of the smaller box.
+
+    This is label-independent: it catches stamps Docling mislabels as
+    ``"paragraph"`` (which the :data:`_DECORATIVE_LABELS` set cannot, since
+    they never match a furniture name). The large-stamp case is handled
+    correctly -- we keep the small body paragraphs and drop the big overlay,
+    the opposite of a naive "drop the smaller box" rule which would delete
+    body text under a full-page stamp.
+
+    We pick the survivor purely by overlap-count (no label priority table):
+    that avoids dropping a large but legitimate table that happens to sit
+    near two captions, and keeps the implementation free of a priority
+    ordering that would need maintaining.
+    """
+    if len(page_regions) < 2:
+        return list(page_regions)
+    keep: list[dict[str, Any]] = []
+    for i, cand in enumerate(page_regions):
+        # Distinct bboxes among the regions this one substantially overlaps.
+        # Using distinct *geometry* (not merely "!= cand") is what stops us
+        # nuking a cluster of items that happen to share one bbox -- e.g. test
+        # fakes, or a heading and its body paragraph Docling bounds
+        # identically. A real overlay stamp sits on top of SEVERAL
+        # *differently-positioned* body regions, so its overlapped-geometry
+        # set is large; a shared-bbox cluster's set has size 1 and is kept.
+        overlapped_bboxes: set[tuple[int, int, int, int]] = set()
+        for j, other in enumerate(page_regions):
+            if i == j:
+                continue
+            if _overlap_fraction(cand["bbox"], other["bbox"]) >= _OVERLAP_DROP_FRACTION:
+                overlapped_bboxes.add(other["bbox"])
+        if len(overlapped_bboxes) >= 2:
+            logger.info(
+                "dropping region overlapping %d regions on page %s (label=%s) "
+                "as decorative/stamp: %.60r",
+                len(overlapped_bboxes), cand.get("page"),
+                cand.get("label"), cand.get("text"),
+            )
+            continue
+        keep.append(cand)
+    return keep
+
+
+def _walk_doc(doc: Any, *, ocr_applied: bool = False) -> DoclingResult:
     """Walk a DoclingDocument and emit UIR-shaped regions / tables.
 
     Docling's structure is version-dependent: some builds expose
@@ -492,6 +750,13 @@ def _walk_doc(doc: Any) -> DoclingResult:
     across the 2.x line. Items missing all expected attributes are
     silently dropped (the orchestrator's noise-filter will catch their
     downstream consequences anyway).
+
+    ``ocr_applied`` is ``True`` when this document was produced by the
+    OCR path (``extract_with_docling`` re-converted a scan with OCR on).
+    Tables emitted from such a page inherit a lowered ``confidence`` so the
+    downstream ``ChunkNode`` flags them as less trustworthy, and each table's
+    markdown is run through :func:`_table_markdown_sanity` to catch
+    Docling mis-binding its rows.
     """
     regions: list[dict[str, Any]] = []
     tables: list[dict[str, Any]] = []
@@ -500,7 +765,9 @@ def _walk_doc(doc: Any) -> DoclingResult:
 
     # First pass: tables (Docling carries them as a top-level collection
     # in addition to embedding them in the page stream; emit once so
-    # we don't double-count).
+    # we don't double-count). Each table gets a `confidence` (consumed
+    # downstream by ChunkNode) reflecting whether it came from OCR and
+    # whether its markdown passed structural sanity.
     table_items = getattr(doc, "tables", None) or []
     seen_table_keys: set[tuple[int, str]] = set()
     for ti in table_items:
@@ -516,10 +783,27 @@ def _walk_doc(doc: Any) -> DoclingResult:
         if key in seen_table_keys:
             continue
         seen_table_keys.add(key)
+        # Confidence starts at full and is pulled down by the two known
+        # risk factors: OCR extraction, and an internally inconsistent
+        # table (column-count / numeric-column row-shift). The lowest
+        # applicable floor wins.
+        confidence = 1.0
+        if ocr_applied:
+            confidence = min(confidence, OCR_TABLE_CONFIDENCE)
+        ok, reasons = _table_markdown_sanity(md)
+        if not ok:
+            confidence = min(confidence, SANITY_FAIL_CONFIDENCE)
+            logger.warning(
+                "table on page %d failed structural sanity check "
+                "(confidence lowered to %.2f): %s",
+                page, confidence, "; ".join(reasons),
+            )
         tables.append({
             "markdown": md,
             "page": page,
             "bbox": bbox,
+            "confidence": round(confidence, 3),
+            "ocr": bool(ocr_applied),
         })
 
     # Second pass: typed regions block-by-block, page-aware.
@@ -555,7 +839,17 @@ def _walk_doc(doc: Any) -> DoclingResult:
 
     for page_no, items in groups:
         text_buffer: list[str] = []
+        page_regions: list[dict[str, Any]] = []
         for it in items:
+            try:
+                raw = _raw_label_of(it)
+            except Exception:  # noqa: BLE001
+                raw = None
+            if raw is not None and raw in _DECORATIVE_LABELS:
+                # Page furniture / watermark / stamp: not body content. Skip
+                # before mapping so it never reaches the "paragraph" fallback
+                # and pollutes the chunk stream.
+                continue
             try:
                 label_raw = _label_of(it)
             except Exception:  # noqa: BLE001
@@ -564,6 +858,13 @@ def _walk_doc(doc: Any) -> DoclingResult:
                 text = _text_of(it)
             except Exception:  # noqa: BLE001
                 text = ""
+            raw_text = text
+            text = _strip_watermark_text(text)
+            if text != raw_text:
+                logger.info(
+                    "stripped watermark/stamp text from region: %.60r -> %.60r",
+                    raw_text, text,
+                )
             try:
                 bbox = _bbox_xyxy(getattr(_first_prov(it), "bbox", None))
             except Exception:  # noqa: BLE001
@@ -576,7 +877,7 @@ def _walk_doc(doc: Any) -> DoclingResult:
                 # Tables were already emitted in the first pass; skip
                 # emission here to avoid duplicating with `tables`.
                 continue
-            if not text and label_raw in ("heading", "paragraph", "list_item"):
+            if not text and label_raw in ("heading", "paragraph", "list"):
                 # Empty headings/paragraphs are noise.
                 continue
             region = {
@@ -585,9 +886,15 @@ def _walk_doc(doc: Any) -> DoclingResult:
                 "bbox": bbox,
                 "label": label_raw,
             }
-            regions.append(region)
+            page_regions.append(region)
             if text:
                 text_buffer.append(text)
+        # Label-independent backstop for decorative overlays (e.g. a rotated
+        # "DRAFT" stamp Docling labelled as "paragraph"): drop regions that
+        # overlap >= 2 others on this page. Runs per-page so a multi-page
+        # stamp can't be mistaken for a cross-page adjacency.
+        for region in _filter_decorative_by_overlap(page_regions):
+            regions.append(region)
         page_texts.append((page_no, "\n\n".join(text_buffer)))
 
     # Third pass: pictures/figures. Docling exposes them via either

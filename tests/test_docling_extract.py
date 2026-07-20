@@ -452,3 +452,254 @@ def test_orchestrator_propagates_when_docling_unavailable(tmp_data_dir, monkeypa
         )
 
 
+# ---------------------------------------------------------------------------
+# Issue fix: table confidence (OCR + structural sanity) -- Bug 1
+# ---------------------------------------------------------------------------
+
+def test_ocr_table_gets_lowered_confidence():
+    """A table emitted from an OCR-converted (scanned) page inherits a
+    lowered confidence (0.6) and an ``ocr`` flag, regardless of whether
+    its markdown is structurally clean."""
+    fake_table = _FakeTableItem(
+        markdown="| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n",
+        bbox=(10, 20, 990, 800), page=1,
+    )
+    doc = _FakeDocument(tables=[fake_table], pages=[])
+    from uir_pipeline.docling_extract import _walk_doc
+    result = _walk_doc(doc, ocr_applied=True)
+    assert len(result.tables) == 1
+    assert result.tables[0]["confidence"] == 0.6
+    assert result.tables[0]["ocr"] is True
+
+
+def test_borndigital_table_keeps_full_confidence():
+    """A clean born-digital table (no OCR) keeps confidence 1.0."""
+    fake_table = _FakeTableItem(
+        markdown="| a | b |\n|---|---|\n| 1 | 2 |\n",
+        bbox=(10, 20, 990, 800), page=1,
+    )
+    doc = _FakeDocument(tables=[fake_table], pages=[])
+    from uir_pipeline.docling_extract import _walk_doc
+    result = _walk_doc(doc)
+    assert result.tables[0]["confidence"] == 1.0
+    assert result.tables[0]["ocr"] is False
+
+
+def test_table_with_numeric_column_rowshift_fails_sanity(caplog):
+    """Reproduces the 02_scan_simulated_invoice.pdf symptom: UNIT/EXT are
+    shifted so the currency column ends up mostly empty. The structural
+    sanity check flags the table (confidence -> 0.4) and logs why."""
+    import logging as _logging
+    from uir_pipeline.docling_extract import _walk_doc
+    md = (
+        "| SKU | Description | QTY | UNIT $ | EXT $ |\n"
+        "|---|---|---|---|---|\n"
+        "| A1 | Widget | 2 | 10.00 | |\n"
+        "| A2 | Gadget | 3 | 15.00 | |\n"
+    )
+    fake_table = _FakeTableItem(markdown=md, page=1)
+    doc = _FakeDocument(tables=[fake_table], pages=[])
+    with caplog.at_level(_logging.WARNING):
+        result = _walk_doc(doc)
+    assert result.tables[0]["confidence"] == 0.4
+    assert any(
+        "structural sanity" in r.message and "EXT" in r.message
+        for r in caplog.records
+    )
+
+
+def test_table_with_ragged_columns_fails_sanity():
+    """A data row with a different column count than the header is caught
+    by the sanity check and flagged (confidence -> 0.4)."""
+    from uir_pipeline.docling_extract import _walk_doc
+    md = (
+        "| A | B | C |\n"
+        "|---|---|---|\n"
+        "| 1 | 2 | 3 | 4 |\n"
+    )
+    fake_table = _FakeTableItem(markdown=md, page=1)
+    doc = _FakeDocument(tables=[fake_table], pages=[])
+    result = _walk_doc(doc)
+    assert result.tables[0]["confidence"] == 0.4
+
+
+def test_docling_to_table_draft_reads_confidence():
+    """_docling_to_table_draft threads the per-table confidence (set in
+    docling_extract) into TableDraft; missing key falls back to 0.9."""
+    from uir_pipeline.pipeline import _docling_to_table_draft
+    low = _docling_to_table_draft({
+        "markdown": "| a | b |\n|---|---|\n| 1 | 2 |\n",
+        "page": 3, "bbox": (1, 2, 3, 4), "confidence": 0.6,
+    })
+    assert low.confidence == 0.6
+    legacy = _docling_to_table_draft({
+        "markdown": "| a | b |\n|---|---|\n| 1 | 2 |\n",
+        "page": 3, "bbox": (1, 2, 3, 4),
+    })
+    assert legacy.confidence == 0.9
+
+
+# ---------------------------------------------------------------------------
+# Issue fix: decorative / watermark text (raw-label discard + bbox overlap) -- Bug 2
+# ---------------------------------------------------------------------------
+
+def test_decorative_raw_label_is_dropped():
+    """A region whose raw Docling label is a furniture/decorative name is
+    skipped entirely -- it must not reach the "paragraph" fallback."""
+    from uir_pipeline.docling_extract import _walk_doc, _DECORATIVE_LABELS
+    # Use a label that is NOT in _LABEL_MAP but IS in _DECORATIVE_LABELS.
+    stamp_label = sorted(_DECORATIVE_LABELS)[0]
+    page = _FakePage(page_no=1, items=[
+        _FakeItem("paragraph", "Real body text on the page.", page=1,
+                  bbox=(50, 50, 300, 200)),
+        _FakeItem(stamp_label, "DRAFT - DO NOT DISTRIBUTE", page=1,
+                  bbox=(50, 50, 300, 200)),
+    ])
+    doc = _FakeDocument(tables=[], pages=[page])
+    result = _walk_doc(doc)
+    texts = [r["text"] for r in result.regions]
+    assert "Real body text on the page." in texts
+    assert "DRAFT - DO NOT DISTRIBUTE" not in texts
+
+
+def test_empty_list_region_is_dropped():
+    """Regression: _LABEL_MAP normalizes both "list_item" and "list" to the
+    canonical "list", so the empty-text noise filter must check "list" (not
+    the raw "list_item") or empty list regions leak into the stream."""
+    from uir_pipeline.docling_extract import _walk_doc
+    page = _FakePage(page_no=1, items=[
+        _FakeItem("list_item", "", page=1, bbox=(50, 50, 300, 200)),
+        _FakeItem("list_item", "A real bullet", page=1, bbox=(50, 260, 300, 360)),
+    ])
+    doc = _FakeDocument(tables=[], pages=[page])
+    result = _walk_doc(doc)
+    assert len(result.regions) == 1
+    assert result.regions[0]["text"] == "A real bullet"
+
+
+def test_overlap_stamp_dropped_body_kept():
+    """Label-independent backstop: a large rotated "DRAFT" stamp that
+    Docling mislabeled as "paragraph" (so it escapes the label discard)
+    overlaps several distinct body paragraphs; it is dropped while the
+    body paragraphs survive."""
+    from uir_pipeline.docling_extract import _walk_doc
+    stamp = _FakeItem("paragraph", "DRAFT - DO NOT DISTRIBUTE", page=1,
+                      bbox=(40, 40, 460, 460))
+    para1 = _FakeItem("paragraph", "Body paragraph one of section three.",
+                       page=1, bbox=(100, 100, 300, 200))
+    para2 = _FakeItem("paragraph", "Body paragraph two of section three.",
+                       page=1, bbox=(100, 260, 300, 360))
+    page = _FakePage(page_no=1, items=[stamp, para1, para2])
+    doc = _FakeDocument(tables=[], pages=[page])
+    result = _walk_doc(doc)
+    texts = [r["text"] for r in result.regions]
+    assert "DRAFT - DO NOT DISTRIBUTE" not in texts
+    assert "Body paragraph one of section three." in texts
+    assert "Body paragraph two of section three." in texts
+
+
+def test_shared_bbox_cluster_not_nuked():
+    """Regression guard: several regions that merely share one bounding box
+    (e.g. a heading and its body text Docling bounds identically) must NOT
+    be deleted by the overlap filter -- only a region overlapping several
+    DISTINCT geometries is a decorative overlay."""
+    from uir_pipeline.docling_extract import _walk_doc
+    items = [
+        _FakeItem("section_header", "Section title", page=1,
+                   bbox=(0, 0, 100, 100)),
+        _FakeItem("paragraph", "Paragraph bound to the same box", page=1,
+                   bbox=(0, 0, 100, 100)),
+        _FakeItem("list_item", "A bullet in the same box", page=1,
+                   bbox=(0, 0, 100, 100)),
+    ]
+    page = _FakePage(page_no=1, items=items)
+    doc = _FakeDocument(tables=[], pages=[page])
+    result = _walk_doc(doc)
+    # All three survive (distinct-bbox count is 1, below the drop threshold).
+    assert len(result.regions) == 3
+
+
+def test_chunk_text_honors_injected_confidence():
+    """chunk_text passes an injected confidence through to ChunkDraft so a
+    low-confidence (OCR / sanity-failed) table carries its flag downstream."""
+    from uir_pipeline.chunk import chunk_text
+    drafts = chunk_text(
+        "| a | b |\n|---|---|\n| 1 | 2 |\n", page=1,
+        bbox=(0, 0, 100, 100), region_kind="table", confidence=0.6,
+    )
+    assert len(drafts) >= 1
+    assert all(d.confidence == 0.6 for d in drafts)
+
+
+def test_strip_watermark_text_removes_phrase_only():
+    """_strip_watermark_text removes a fused stamp phrase but leaves the
+    surrounding body text (the case Docling produces on a rotated stamp)."""
+    from uir_pipeline.docling_extract import _strip_watermark_text
+    fused = (
+        "The quick brown fox jumps over the lazy dog while the system "
+        "ingests documents\r\nDRAFT - DO NOT DISTRIBUTE"
+    )
+    out = _strip_watermark_text(fused)
+    assert "DRAFT" not in out.upper()
+    assert "DISTRIBUTE" not in out.upper()
+    assert "quick brown fox" in out
+
+
+def test_strip_watermark_text_idempotent_on_clean():
+    """Stamp-free body text is returned unchanged (no false positives on
+    ordinary prose mentioning 'a draft proposal')."""
+    from uir_pipeline.docling_extract import _strip_watermark_text
+    clean = "We prepared a draft proposal for the confidential review."
+    assert _strip_watermark_text(clean) == clean
+
+
+@pytest.mark.skipif(
+    not docling_environment_enabled(),
+    reason="docling not importable in this environment",
+)
+def test_fixture_watermark_absent_from_regions():
+    """Integration: re-run 01_messy_multicolumn_report.pdf end-to-end; the
+    DRAFT stamp must NOT appear in any emitted region."""
+    from pathlib import Path
+
+    from uir_pipeline.docling_extract import (
+        DoclingUnavailable,
+        extract_with_docling,
+    )
+    pdf = Path("tests/fixtures/sample_pdfs/01_messy_multicolumn_report.pdf")
+    if not pdf.is_file():
+        pytest.skip(f"fixture missing: {pdf}")
+    try:
+        r = extract_with_docling(pdf)
+    except DoclingUnavailable as exc:
+        pytest.skip(f"docling backend unavailable ({exc}); skip")
+    joined = " ".join(x["text"] for x in r.regions).upper()
+    assert "DRAFT" not in joined
+    assert "DO NOT DISTRIBUTE" not in joined
+
+
+@pytest.mark.skipif(
+    not docling_environment_enabled(),
+    reason="docling not importable in this environment",
+)
+def test_fixture_scan_invoice_table_flagged_low_confidence():
+    """Integration: re-run 02_scan_simulated_invoice.pdf (image-only, so it
+    routes through OCR); its table must carry confidence < 1.0 and ocr=True."""
+    from pathlib import Path
+
+    from uir_pipeline.docling_extract import (
+        DoclingUnavailable,
+        extract_with_docling,
+    )
+    pdf = Path("tests/fixtures/sample_pdfs/02_scan_simulated_invoice.pdf")
+    if not pdf.is_file():
+        pytest.skip(f"fixture missing: {pdf}")
+    try:
+        r = extract_with_docling(pdf)
+    except DoclingUnavailable as exc:
+        pytest.skip(f"docling/OCR backend unavailable ({exc}); skip")
+    assert len(r.tables) >= 1, "scan fixture yielded no table to flag"
+    assert all(t["confidence"] < 1.0 for t in r.tables)
+    assert any(t.get("ocr") for t in r.tables)
+
+
